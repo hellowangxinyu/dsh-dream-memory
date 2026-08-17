@@ -204,14 +204,19 @@ export function apply(ctx, input = {}) {
       }],
     })
     let text = ''
+    let blockText = ''
     for await (const chunk of chunks) {
       if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
+      if (chunk?.type === 'block-end' && chunk.block?.type === 'text' && typeof chunk.block?.text === 'string') {
+        blockText += chunk.block.text
+      }
       if (chunk?.type === 'finish' && (chunk.reason?.kind === 'error' || chunk.reason?.kind === 'aborted')) {
         throw new Error(`[dsh-dream-memory] LLM ${chunk.reason.kind}`)
       }
     }
-    if (!text.trim()) throw new Error('[dsh-dream-memory] LLM 返回空结果')
-    return text
+    const result = text || blockText
+    if (!result.trim()) throw new Error('[dsh-dream-memory] LLM 返回空结果')
+    return result
   }
 
   // ── 事件摄入（幂等，DSH event.seq 作为唯一键） ──
