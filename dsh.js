@@ -16,7 +16,7 @@ import { spawnSync } from 'node:child_process'
 import { openDb, getMeta } from './src/db.js'
 import {
   upsertMemory, getMemory, listMemories, saveMessageOnce, getStats, setStatus, touchMemory,
-  resolveProjectId, projectLabel,
+  resolveProjectId, projectLabel, getUnextracted,
 } from './src/store.js'
 import { recall, markAccessed } from './src/recall.js'
 import { buildIdentityCard, formatRecall, formatList } from './src/inject.js'
@@ -153,6 +153,7 @@ export function apply(ctx, input = {}) {
   const identityInjected = new Map() // sessionKey -> true（身份卡每会话只注入一次）
   const lastInjected = new Map() // sessionKey -> ids string
   const hermesImported = new Set() // 已尝试导入的工作区根目录
+  const dreamQueued = new Set() // 已有梦境在排队/运行的 session
   let closing = false
 
   function metaFor(id) {
@@ -258,12 +259,25 @@ export function apply(ctx, input = {}) {
 
     if (!Array.isArray(agent?.session?.events)) return
     for (const event of agent.session.events) ingest(id, event)
+      maybeScheduleDream(id)
+
+    function maybeScheduleDream(sessionId) {
+      if (cfg.dreamEnabled === false || closing) return
+      const key = String(sessionId)
+      if (dreamQueued.has(key)) return
+      if (getUnextracted(db, 50).length >= Math.max(1, Number(cfg.minDreamMessages ?? 3))) {
+        scheduleDream(key)
+      }
+    }
+
   }
 
   function scheduleDream(sessionId) {
     if (cfg.dreamEnabled === false || closing) return
     const key = String(sessionId)
-    const previous = extractChain.get(key) ?? Promise.resolve()
+    if (dreamQueued.has(key)) return
+      dreamQueued.add(key)
+      const previous = extractChain.get(key) ?? Promise.resolve()
     const next = previous.then(async () => {
       const meta = scopeInfoOf(key)
       await runDream(db, cfg, {
@@ -279,6 +293,7 @@ export function apply(ctx, input = {}) {
     extractChain.set(key, next)
     void next.finally(() => {
       if (extractChain.get(key) === next) extractChain.delete(key)
+        dreamQueued.delete(key)
     })
   }
 
@@ -318,6 +333,7 @@ export function apply(ctx, input = {}) {
       const turns = (turnCounts.get(key) ?? 0) + 1
       turnCounts.set(key, turns)
       if (turns % cfg.dreamInterval === 0) scheduleDream(key)
+        if (getUnextracted(db, 50).length >= 50) scheduleDream(key)
     }
   })
 
