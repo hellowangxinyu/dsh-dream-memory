@@ -561,7 +561,7 @@ export function apply(ctx, input = {}) {
         req.on('end', () => { try { resolve(JSON.parse(data)) } catch { resolve(null) } })
       })
       const dispose = ctx.webServer.register({
-        kind: 'exact',
+        kind: 'prefix',
         path: '/api/dsh-dream-memory',
         handler: async (req, res) => {
           if (!isLoopback(req)) return writeJson(res, 403, { ok: false, error: 'forbidden: loopback-only' })
