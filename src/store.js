@@ -7,7 +7,8 @@
 
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { getMeta } from './db.js'
+import { getMeta, setMeta } from './db.js'
+export { getMeta, setMeta }
 
 const VALID_KINDS = new Set([
   'profile', 'key', 'log', 'task', 'skill', 'event', 'fact', 'preference', 'decision',
