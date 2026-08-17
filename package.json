@@ -1,0 +1,34 @@
+{
+  "name": "dsh-dream-memory",
+  "version": "0.1.0",
+  "description": "DSH 长期记忆插件：SQLite + FTS5 + 知识图谱 + 梦境整理。记得住、记得多、记得久，按需召回，上下文开销恒定。",
+  "type": "module",
+  "main": "dsh.js",
+  "exports": {
+    ".": "./dsh.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dsh.js",
+    "src",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "migrate": "node scripts/migrate-legacy.js",
+    "cleanup": "node scripts/cleanup-legacy.js",
+    "export": "node scripts/export-md.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
