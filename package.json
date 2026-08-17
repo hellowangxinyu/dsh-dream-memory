@@ -6,10 +6,12 @@
   "main": "dsh.js",
   "exports": {
     ".": "./dsh.js",
-    "./package.json": "./package.json"
+    "./client": "./lib/client.js",
+      "./package.json": "./package.json"
   },
   "files": [
     "dsh.js",
+    "lib",
     "src",
     "scripts",
     "cordis.patch.yml",
@@ -27,8 +29,7 @@
     "test": "node --test tests/*.test.js"
   },
   "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    }
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "inject": [], "platform": "web" }
   }
 }

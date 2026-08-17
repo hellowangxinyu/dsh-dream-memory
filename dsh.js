@@ -22,9 +22,10 @@ import { recall, markAccessed } from './src/recall.js'
 import { buildIdentityCard, formatRecall, formatList } from './src/inject.js'
 import { runDream } from './src/dream.js'
 import { importLegacy, legacyDirDefault, importHermesWorkspace } from './src/migrate.js'
+import { loadSettings, saveSettings, settingsView, defaultDbPath } from './src/settings.js'
 
 export const name = 'dsh-dream-memory'
-export const inject = ['tools', 'systemPrompt', 'llm', 'sessions', 'credentials']
+export const inject = ['tools', 'systemPrompt', 'llm', 'sessions', 'credentials', 'webServer']
 
 const HOST = 'dsh'
 
@@ -106,7 +107,7 @@ function cwdOf(agent) {
 }
 
 export function apply(ctx, input = {}) {
-  const db = openDb(input.dbPath ?? process.env.DREAM_MEMORY_DB ?? '~/.dsh/dream-memory/memory.db')
+  const db = openDb(input.dbPath ?? process.env.DREAM_MEMORY_DB ?? defaultDbPath())
 
   // ── 一次性迁移：dsh-memory-evolve → 本插件 ─────────────────
   if (input.legacyImport !== false) {
@@ -132,16 +133,14 @@ export function apply(ctx, input = {}) {
     }
   }
 
-  const cfg = {
-    recallMaxNodes: Number(input.recallMaxNodes ?? 6),
-    recallMaxDepth: Number(input.recallMaxDepth ?? 1),
-    dreamInterval: Number(input.dreamInterval ?? 6),
-    minDreamMessages: Number(input.minDreamMessages ?? 3),
-    identityMaxChars: Number(input.identityMaxChars ?? 750),
-    recallMaxChars: Number(input.recallMaxChars ?? 1500),
-    dreamEnabled: input.dreamEnabled !== false,
-    recallEnabled: input.recallEnabled !== false,
-  }
+  const _dbPath = input.dbPath ?? process.env.DREAM_MEMORY_DB ?? defaultDbPath()
+
+  // 运行时设置：面板保存后立即生效（Proxy 每次读取都从文件刷新）
+  const cfg = new Proxy({}, {
+    get(_target, prop) {
+      return loadSettings(_dbPath, input)[prop]
+    },
+  })
 
   const latestRoute = new Map()
   const latestPrompt = new Map()
@@ -512,7 +511,7 @@ export function apply(ctx, input = {}) {
     output: stringOutput('记忆状态'),
     execute: async () => {
       const stats = getStats(db)
-      return `dsh-dream-memory\n库: ${input.dbPath ?? '默认路径'}\n` +
+      return `dsh-dream-memory\n库: ${_dbPath}\n` +
           `Hermes 导入: ${getMeta(db, 'hermes_imports') ?? '无'}\n` +
         `条目: ${stats.total}（active ${stats.active} / candidate ${stats.candidates}）\n` +
         `边: ${stats.edges}  原始事件: ${stats.messages}  向量: ${stats.vectors}\n` +
@@ -539,11 +538,62 @@ export function apply(ctx, input = {}) {
     },
   })
 
+
+    // ── Web API：设置面板用的读写路由（loopback-only） ──
+    ctx.effect(() => {
+      const writeJson = (res, status, body) => {
+        res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'referrer-policy': 'no-referrer' })
+        res.end(JSON.stringify(body))
+      }
+      const isLoopback = (req) => {
+        const addr = req.socket?.remoteAddress
+        if (addr !== '127.0.0.1' && addr !== '::1' && addr !== '::ffff:127.0.0.1') return false
+        const host = req.headers?.host
+        if (typeof host !== 'string') return false
+        try {
+          const h = new URL(`http://${host}`).hostname
+          return h === '127.0.0.1' || h === 'localhost' || h === '[::1]'
+        } catch { return false }
+      }
+      const readBody = (req) => new Promise((resolve) => {
+        let data = ''
+        req.on('data', (c) => { data += c; if (data.length > 100_000) req.destroy() })
+        req.on('end', () => { try { resolve(JSON.parse(data)) } catch { resolve(null) } })
+      })
+      const dispose = ctx.webServer.register({
+        kind: 'exact',
+        path: '/api/dsh-dream-memory',
+        handler: async (req, res) => {
+          if (!isLoopback(req)) return writeJson(res, 403, { ok: false, error: 'forbidden: loopback-only' })
+          const sub = req.url?.split('?')[0]?.replace('/api/dsh-dream-memory', '') || '/'
+          try {
+            if (sub === '/settings' && req.method === 'GET') {
+              return writeJson(res, 200, { ok: true, ...settingsView(_dbPath, input) })
+            }
+            if (sub === '/settings' && req.method === 'POST') {
+              const patch = await readBody(req)
+              if (!patch || typeof patch !== 'object') return writeJson(res, 400, { ok: false, error: 'invalid JSON' })
+              const values = saveSettings(_dbPath, patch)
+              return writeJson(res, 200, { ok: true, values })
+            }
+            if (sub === '/status' && req.method === 'GET') {
+              const stats = getStats(db)
+              return writeJson(res, 200, { ok: true, ...stats, dbPath: _dbPath })
+            }
+            return writeJson(res, 404, { ok: false, error: `unknown route: ${req.method} ${sub}` })
+          } catch (err) {
+            return writeJson(res, 500, { ok: false, error: err?.message ?? String(err) })
+          }
+        },
+      })
+      return () => dispose()
+    }, 'dsh-dream-memory: web api')
+
   ctx.effect(() => async () => {
     closing = true
     await Promise.allSettled([...extractChain.values()])
     db.close()
   }, 'dsh-dream-memory.close')
 
-  ctx.logger?.info(`[dsh-dream-memory] active at ${input.dbPath ?? '~/.dsh/dream-memory/memory.db'}`)
+  ctx.logger?.info(`[dsh-dream-memory] active at ${_dbPath}`)
 }
