@@ -204,7 +204,7 @@ test('decayStaleMemories：90 天以上未访问且 importance<0.7 自动归档'
   const fresh_ms = Date.now() - 30 * 86400 * 1000
   db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(fresh_ms, fresh_ms, fresh.memory.id)
 
-  const r = decayStaleMemories(db, { staleDays: 90, maxBatch: 100 })
+  const r = decayStaleMemories(db, { tierDays: { knowledge: 90 }, maxBatch: 100 })
   assert.ok(r.decayed >= 1, `至少归档 1 条，实际 ${r.decayed}`)
 
   // 验证：老记忆被归档
@@ -246,8 +246,71 @@ test('decayStaleMemories：maxBatch 限制单次归档数', () => {
     db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(old_ms, old_ms, m.memory.id)
     ids.push(m.memory.id)
   }
-  const r = decayStaleMemories(db, { staleDays: 90, maxBatch: 2 })
+  const r = decayStaleMemories(db, { tierDays: { knowledge: 90 }, maxBatch: 2 })
   assert.equal(r.decayed, 2, `应只归档 2 条，实际 ${r.decayed}`)
+})
+
+// ─── Tier 分层：profile → identity，不会被 knowledge 的 decay 误伤 ───────
+
+test('decayStaleMemories：profile (identity tier) 默认 1825 天不归档', () => {
+  // 1 条 profile 记忆 200 天前创建，importance 0.5
+  const profile = upsertMemory(db, {
+    kind: 'profile', scope: 'global',
+    summary: '老大在山东临沂',
+    content: '老大在山东临沂',
+    importance: 0.5,
+  })
+  assert.equal(profile.memory.tier, 'identity', `kind=profile 应自动 tier=identity，实际 ${profile.memory.tier}`)
+  const old_ms = Date.now() - 200 * 86400 * 1000
+  db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(old_ms, old_ms, profile.memory.id)
+
+  // 200 天前的 knowledge fact 应当被归档
+  const fact = upsertMemory(db, {
+    kind: 'fact', scope: 'global',
+    content: 'should decay',
+    importance: 0.5,
+  })
+  db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(old_ms, old_ms, fact.memory.id)
+
+  // 默认参数：knowledge=90, working=14, identity=1825
+  const r = decayStaleMemories(db, { maxBatch: 100 })
+  const profileAfter = db.prepare('SELECT status FROM memories WHERE id=?').get(profile.memory.id)
+  const factAfter = db.prepare('SELECT status FROM memories WHERE id=?').get(fact.memory.id)
+  assert.equal(profileAfter.status, 'active', '200 天的 profile 应仍 active（identity=1825d）')
+  assert.equal(factAfter.status, 'archived', '200 天的 fact 应被归档（knowledge=90d）')
+})
+
+test('decayStaleMemories：task (working tier) 14 天就归档', () => {
+  const task = upsertMemory(db, {
+    kind: 'task', scope: 'global',
+    content: '短期任务',
+    importance: 0.5,
+  })
+  assert.equal(task.memory.tier, 'working', `kind=task 应自动 tier=working`)
+  const old_ms = Date.now() - 30 * 86400 * 1000
+  db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(old_ms, old_ms, task.memory.id)
+
+  const r = decayStaleMemories(db, { maxBatch: 100 })
+  const taskAfter = db.prepare('SELECT status FROM memories WHERE id=?').get(task.memory.id)
+  assert.equal(taskAfter.status, 'archived', '30 天的 task 应被归档（working=14d）')
+})
+
+test('upsertMemory：kind 自动推断 tier', () => {
+  const profile = upsertMemory(db, { kind: 'profile', scope: 'global', content: 'p' })
+  assert.equal(profile.memory.tier, 'identity')
+  const task = upsertMemory(db, { kind: 'task', scope: 'global', content: 't' })
+  assert.equal(task.memory.tier, 'working')
+  const event = upsertMemory(db, { kind: 'event', scope: 'global', content: 'e' })
+  assert.equal(event.memory.tier, 'working')
+  const log = upsertMemory(db, { kind: 'log', scope: 'global', content: 'l' })
+  assert.equal(log.memory.tier, 'working')
+  const fact = upsertMemory(db, { kind: 'fact', scope: 'global', content: 'f' })
+  assert.equal(fact.memory.tier, 'knowledge')
+  const pref = upsertMemory(db, { kind: 'preference', scope: 'global', content: 'p2' })
+  assert.equal(pref.memory.tier, 'knowledge')
+  // 显式覆盖
+  const override = upsertMemory(db, { kind: 'profile', scope: 'global', content: 'o', tier: 'working' })
+  assert.equal(override.memory.tier, 'working', '显式 tier 应覆盖推断')
 })
 
 // ─── mergeSimilarMemories 让库保持高效简洁 ─────────────────────────────

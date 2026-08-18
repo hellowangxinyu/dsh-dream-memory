@@ -190,6 +190,14 @@ export function upsertMemory(db, candidate, { sessionRef = null } = {}) {
   const summary = String(candidate.summary ?? '').trim() || autoSummary(content)
   const contentHash = contentHashFor({ kind: candidate.kind, scope, projectId, branch: candidate.branch ?? null, content })
 
+  // tier 默认按 kind 推断：profile → identity；task/event/log → working；其他 → knowledge
+  // 调用方可显式覆盖
+  const inferredTier = candidate.tier ?? (
+    candidate.kind === 'profile' ? 'identity'
+    : ['task', 'event', 'log'].includes(candidate.kind) ? 'working'
+    : 'knowledge'
+  )
+
   let existing = db.prepare('SELECT * FROM memories WHERE content_hash=?').get(contentHash)
   if (!existing && name) {
     existing = db.prepare(
@@ -220,13 +228,14 @@ export function upsertMemory(db, candidate, { sessionRef = null } = {}) {
   const id = uid('m')
   const refs = Array.from(new Set([...(candidate.sourceRefs ?? []), ...(sessionRef ? [sessionRef] : [])]))
   db.prepare(`
-    INSERT INTO memories (id, kind, layer, scope, project_id, project_label, branch, name,
+    INSERT INTO memories (id, kind, tier, layer, scope, project_id, project_label, branch, name,
       summary, content, importance, confidence, status, validated_count, content_hash,
       source_refs, created_at, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).run(
     id,
     candidate.kind,
+    inferredTier,
     Number.isInteger(candidate.layer) ? candidate.layer : 1,
     scope,
     projectId,
@@ -604,37 +613,61 @@ export { tokenizeCjk, jaccardTokens, isCjkChar }
 
 // ─── 自动归档（decay）：让库不无限膨胀 ────────────────────────────────
 
-// 规则：创建 N 天 + 从未访问 + importance < 0.7 → 自动归档
-//  - 不动 validated_count > 1（被多次重复验证的）
-//  - 不动 importance >= 0.7（被认定为重要）
-//  - 不动 90 天内新记忆（给 agent 时间消化）
-// 含义：默认 0.6 importance 且从没被引用的记忆——这类恰好是数量膨胀的来源，
-//      90 天还没被任何场景召回，说明价值低。
-export function decayStaleMemories(db, { staleDays = 90, maxBatch = 100, importanceMax = 0.7 } = {}) {
-  const cutoff = Date.now() - staleDays * 86400 * 1000
-  const stale = db.prepare(`
-    SELECT id, kind, importance, validated_count, last_accessed_at,
-           (julianday('now') - julianday(created_at/1000, 'unixepoch')) AS age_days
-    FROM memories
-    WHERE status='active'
-      AND importance < ?
-      AND validated_count <= 1
-      AND last_accessed_at IS NULL
-      AND created_at < ?
-    ORDER BY created_at ASC
-    LIMIT ?
-  `).all(importanceMax, cutoff, maxBatch)
+// 三层 tier 独立 decay 阈值：
+//   - identity: 1825 天（5 年）— 身份信息几乎不变
+//   - knowledge: 90 天（默认） — 长期知识
+//   - working: 14 天 — 短期/会话上下文
+// 规则（每 tier 独立）：
+//   - 创建 N 天 + 从未访问 + importance < 0.7 + validated_count <= 1 → 归档
+//   - identity 例外：importance < 0.85 不归档（身份信息 importance 通常 0.6 但意义重大）
+// 含义：默认 0.6 importance 且从没被引用的记忆——这类恰好是数量膨胀的来源。
+export function decayStaleMemories(db, opts = {}) {
+  const {
+    tierDays = { identity: 1825, knowledge: 90, working: 14 },
+    importanceMax = 0.7,
+    importanceMaxIdentity = 0.85,
+    maxBatch = 100,
+  } = opts
 
-  if (stale.length === 0) return { decayed: 0, scanned: 0 }
+  const now = Date.now()
+  let totalDecayed = 0
+  const ids = []
+  const perTier = []
 
-  const ids = stale.map((r) => r.id)
-  const placeholders = ids.map(() => '?').join(',')
-  db.prepare(`
-    UPDATE memories SET status='archived', updated_at=?
-    WHERE id IN (${placeholders}) AND status='active'
-  `).run(Date.now(), ...ids)
+  for (const [tier, days] of Object.entries(tierDays)) {
+    if (!days || days <= 0) continue
+    const cutoff = now - days * 86400 * 1000
+    const impMax = tier === 'identity' ? importanceMaxIdentity : importanceMax
+    const rows = db.prepare(`
+      SELECT id, tier FROM memories
+      WHERE status='active'
+        AND tier = ?
+        AND importance < ?
+        AND validated_count <= 1
+        AND last_accessed_at IS NULL
+        AND created_at < ?
+      ORDER BY created_at ASC
+      LIMIT ?
+    `).all(tier, impMax, cutoff, maxBatch)
 
-  return { decayed: ids.length, scanned: stale.length, ids }
+    if (rows.length === 0) {
+      perTier.push({ tier, days, scanned: 0, decayed: 0 })
+      continue
+    }
+
+    const rIds = rows.map((r) => r.id)
+    const placeholders = rIds.map(() => '?').join(',')
+    db.prepare(`
+      UPDATE memories SET status='archived', updated_at=?
+      WHERE id IN (${placeholders}) AND status='active'
+    `).run(now, ...rIds)
+
+    totalDecayed += rIds.length
+    ids.push(...rIds)
+    perTier.push({ tier, days, scanned: rows.length, decayed: rIds.length })
+  }
+
+  return { decayed: totalDecayed, ids, perTier }
 }
 
 // ─── 合并相似记忆（consolidate）：让库保持"高效简洁" ──────────────────

@@ -50,7 +50,7 @@ function migrate(db) {
   db.exec('CREATE TABLE IF NOT EXISTS _migrations (v INTEGER PRIMARY KEY, at INTEGER NOT NULL)')
   const row = db.prepare('SELECT MAX(v) AS v FROM _migrations').get()
   const cur = row?.v ?? 0
-  const steps = [m1_core, m2_fts, m3_meta]
+  const steps = [m1_core, m2_fts, m3_meta, m4_tier]
   for (let i = cur; i < steps.length; i++) {
     steps[i](db)
     db.prepare('INSERT INTO _migrations (v, at) VALUES (?, ?)').run(i + 1, Date.now())
@@ -209,6 +209,28 @@ function m2_fts(db) {
 function m3_meta(db) {
   db.prepare('INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)').run('dream_cursor', '0')
   db.prepare('INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)').run('pagerank_at', '0')
+}
+
+function m4_tier(db) {
+  // 添加 tier 列：identity / knowledge / working
+  // 旧行按 kind 自动归类：
+  //   profile → identity (用户身份/偏好)
+  //   fact/preference/decision/skill/key → knowledge (长期知识)
+  //   task/event/log → working (短期/会话上下文)
+  // ALTER TABLE 不支持 IF NOT EXISTS，所以用 PRAGMA table_info 检查列是否已存在
+  const cols = db.prepare('PRAGMA table_info(memories)').all()
+  const hasTier = cols.some((c) => c.name === 'tier')
+  if (!hasTier) {
+    db.exec(`ALTER TABLE memories ADD COLUMN tier TEXT NOT NULL DEFAULT 'knowledge'`)
+  }
+
+  // 归类旧数据（幂等）
+  db.exec(`UPDATE memories SET tier='identity' WHERE kind='profile' AND tier='knowledge'`)
+  db.exec(`UPDATE memories SET tier='working'   WHERE kind IN ('task','event','log') AND tier='knowledge'`)
+  // key/fact/preference/decision/skill 保持 'knowledge'
+
+  // 添加索引：recall 按 tier 过滤会很快
+  db.exec('CREATE INDEX IF NOT EXISTS ix_mem_tier ON memories(tier, status)')
 }
 
 export function getMeta(db, key) {

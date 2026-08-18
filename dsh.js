@@ -484,6 +484,7 @@ export function apply(ctx, input = {}) {
         kinds: { type: 'string', description: '可选：逗号分隔的 kind 过滤', default: '' },
       },
     },
+    output: stringOutput('记忆整理'),
     execute: async (args) => {
       const kindsFilter = args.kinds ? String(args.kinds).split(',').map(s => s.trim()).filter(Boolean) : null
       const analysis = analyzeMemoryQuality(db, {
@@ -631,6 +632,7 @@ export function apply(ctx, input = {}) {
         recentDays: { type: 'number', description: '最近多少天的新增统计', default: 7, min: 1, max: 90 },
       },
     },
+    output: stringOutput('跨会话仪表盘'),
     execute: async (args) => {
       const top = Math.max(1, Math.min(50, Number(args.topLimit ?? 10)))
       const days = Math.max(1, Math.min(90, Number(args.recentDays ?? 7)))

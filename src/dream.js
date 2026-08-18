@@ -200,17 +200,24 @@ export async function runDream(db, cfg, scopeInfo, complete, log = () => {}) {
     }
   }
 
-  // 自动归档（decay）：筛选 — 不让库无限膨胀
+  // 自动归档（decay）：分层阈值 — 不让库无限膨胀
   // 0-token 0-LLM：纯 SQL 扫描 + UPDATE
   // 默认开启（cfg.decayEnabled !== false），可在 settings 关闭
   let decayed = 0
   if (cfg.decayEnabled !== false) {
     try {
-      const staleDays = Math.max(1, Number(cfg.decayStaleDays ?? 90))
-      const r = decayStaleMemories(db, { staleDays, maxBatch: 100 })
+      const r = decayStaleMemories(db, {
+        tierDays: {
+          identity: Math.max(1, Number(cfg.decayIdentityDays ?? 1825)),
+          knowledge: Math.max(1, Number(cfg.decayKnowledgeDays ?? 90)),
+          working: Math.max(1, Number(cfg.decayWorkingDays ?? 14)),
+        },
+        maxBatch: 100,
+      })
       decayed = r.decayed
       if (decayed > 0) {
-        log(`decay: archived ${decayed} stale memory (${staleDays}d+, importance<0.7, never accessed)`)
+        const parts = (r.perTier || []).filter((p) => p.decayed > 0).map((p) => `${p.tier}=${p.decayed}`).join(',')
+        log(`decay: archived ${decayed} (${parts})`)
       }
     } catch (err) {
       log(`decay failed: ${err?.message ?? err}`)
