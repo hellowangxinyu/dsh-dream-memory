@@ -29,10 +29,20 @@ export function openDb(dbPath) {
   const resolved = resolvePath(dbPath)
   ensureParentDir(resolved)
   const db = new DatabaseSync(resolved)
+  // 写入路径 PRAGMA (WAL 已默认安全)
   db.exec('PRAGMA journal_mode = WAL')
   db.exec('PRAGMA synchronous = NORMAL')
   db.exec('PRAGMA foreign_keys = ON')
+  // 读取路径 PRAGMA（recall 性能优化）：默认 2MB 缓存太小，扩到 20MB
+  // 1GB mmap 通过 OS page cache 提供，read-heavy 访问接近内存速度
+  // temp_store=MEMORY 让 dream 提取的临时 result 不落盘
+  db.exec('PRAGMA cache_size = -20000')
+  db.exec('PRAGMA temp_store = MEMORY')
+  db.exec('PRAGMA mmap_size = 268435456')
   migrate(db)
+  // ANALYZE 一次让 SQLite 优化器刷新 statistics（recall 路径的 join 更好走索引）
+  // 首次 db startup 跑一次，后续 dream 周期维护（见 src/dream.js）
+  try { db.exec('ANALYZE') } catch { /* 首次启动可能没数据 */ }
   return db
 }
 

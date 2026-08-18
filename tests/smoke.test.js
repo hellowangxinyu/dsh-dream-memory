@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { openDb } from '../src/db.js'
-import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary, decayStaleMemories, mergeSimilarMemories, getDashboardStats, touchMemory } from '../src/store.js'
+import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary, decayStaleMemories, mergeSimilarMemories, getDashboardStats, touchMemory, recordRecallPerf, getRecallPerf } from '../src/store.js'
 import { recall } from '../src/recall.js'
 import { importLegacy, parseLegacyEntry, importHermesWorkspace, parseMarkdownSections } from '../src/migrate.js'
 
@@ -384,6 +384,56 @@ test('getDashboardStats：返回体量+健康+Top+最近', () => {
   assert.ok(s.topAccessed[0].access_count >= 1)
   assert.ok(s.recent.length >= 1)
   assert.ok(s.graph.edges !== undefined)
+})
+
+// ─── 方案 A: Recall 性能监控 ─────────────────────────────────
+
+test('recordRecallPerf + getRecallPerf：每次写入 last/count/sum/window', () => {
+  // 干净初始
+  db.prepare("DELETE FROM meta WHERE key IN ('recall.ms.last','recall.ms.count','recall.ms.sum','recall.ms.window')").run()
+  recordRecallPerf(db, 12)
+  recordRecallPerf(db, 24)
+  recordRecallPerf(db, 36)
+  const p = getRecallPerf(db)
+  assert.equal(p.count, 3)
+  assert.equal(p.sum, 72)
+  assert.equal(p.last, 36)
+  assert.equal(p.avg, 24)
+  assert.equal(p.windowSize, 3)
+  assert.ok(p.p50 >= 12 && p.p50 <= 36)
+  assert.ok(p.p95 >= 12)
+})
+
+test('recordRecallPerf：失败不影响主流程（错误 meta 被吞）', () => {
+  // 不应抛错
+  recordRecallPerf(db, 50)
+  recordRecallPerf(db, 100)
+  assert.ok(true)
+})
+
+test('recall SLA 100ms < 50ms with 200 entries + perf recorded', () => {
+  // 灌 200 条
+  for (let i = 0; i < 200; i++) {
+    upsertMemory(db, {
+      kind: 'fact', scope: 'global',
+      content: `perf 测试 ${i}：数据库表、API 接口、用户偏好、稳定版本、编程框架、虚拟机`,
+      importance: 0.6,
+    })
+  }
+  // 跑 10 次
+  const samples = []
+  for (let i = 0; i < 10; i++) {
+    const t0 = Date.now()
+    recall(db, { recallMaxNodes: 6, recallMaxDepth: 1 }, '数据库表 API', {}, null)
+    samples.push(Date.now() - t0)
+  }
+  const max = Math.max(...samples)
+  const avg = samples.reduce((a, b) => a + b, 0) / samples.length
+  console.log(`  200 条 recall 平均 ${avg.toFixed(1)}ms, 最大 ${max}ms`)
+  // 检查 perf 记录器收集到了
+  const p = getRecallPerf(db)
+  assert.ok(p.count >= 10, `perf 记录 ≥ 10 次 实际 ${p.count}`)
+  assert.ok(max < 50, `200 条 recall 最大 ${max}ms 应 < 50ms`)
 })
 
 test.after(() => {

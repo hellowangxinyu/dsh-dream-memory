@@ -792,3 +792,44 @@ export function getDashboardStats(db, { topLimit = 10, recentDays = 7 } = {}) {
 
   return { totals, byKind, health, topAccessed, topImportance, recent, graph, generatedAt: Date.now() }
 }
+
+// ─── Recall 性能监控（方案 A） ──────────────────────────────────
+// 在每次 recall 调用完后写入 meta 表，0.5ms 开销。
+// 存储：last ms / 总样本数 / 总 ms 数 / p95 滚动窗口（最近 100 条）
+//  debug 起来能直接看 recall 趋势
+
+const PERF_WINDOW_SIZE = 100
+
+export function recordRecallPerf(db, ms) {
+  try {
+    const last = Number(getMeta(db, 'recall.ms.last') ?? 0)
+    const count = Number(getMeta(db, 'recall.ms.count') ?? 0)
+    const sum = Number(getMeta(db, 'recall.ms.sum') ?? 0)
+    const windowRaw = getMeta(db, 'recall.ms.window') ?? '[]'
+    let window = []
+    try { window = JSON.parse(windowRaw) } catch { window = [] }
+    window.push(ms)
+    if (window.length > PERF_WINDOW_SIZE) window = window.slice(-PERF_WINDOW_SIZE)
+    const newCount = count + 1
+    const newSum = sum + ms
+    setMeta(db, 'recall.ms.last', String(ms))
+    setMeta(db, 'recall.ms.count', String(newCount))
+    setMeta(db, 'recall.ms.sum', String(newSum))
+    setMeta(db, 'recall.ms.window', JSON.stringify(window))
+  } catch { /* 监控失败不影响主流程 */ }
+}
+
+export function getRecallPerf(db) {
+  const last = Number(getMeta(db, 'recall.ms.last') ?? 0)
+  const count = Number(getMeta(db, 'recall.ms.count') ?? 0)
+  const sum = Number(getMeta(db, 'recall.ms.sum') ?? 0)
+  const windowRaw = getMeta(db, 'recall.ms.window') ?? '[]'
+  let window = []
+  try { window = JSON.parse(windowRaw) } catch { window = [] }
+  const avg = count > 0 ? sum / count : 0
+  const sorted = [...window].sort((a, b) => a - b)
+  const p50 = sorted[Math.floor(sorted.length * 0.5)] ?? 0
+  const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 0
+  const p99 = sorted[Math.floor(sorted.length * 0.99)] ?? 0
+  return { last, count, sum, avg: Number(avg.toFixed(2)), p50, p95, p99, windowSize: window.length }
+}

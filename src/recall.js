@@ -13,6 +13,7 @@ import {
   getVectorsFor,
   cosine,
   touchMemory,
+  recordRecallPerf,
 } from './store.js'
 import { personalizedPageRank } from './graph.js'
 
@@ -77,6 +78,7 @@ function scoreMemory(memory, { rankIndex, vectorScore, pprScore, now, branch }) 
  * @returns {Promise<{entries: object[], edges: object[], tokens: number, topScore: number}>}
  */
 export async function recall(db, cfg, query, scopeInfo = {}, embedFn = null) {
+  const _t0 = Date.now()
   const limit = Math.max(1, Number(cfg.recallMaxNodes ?? 6))
   const depth = Math.max(0, Number(cfg.recallMaxDepth ?? 1))
   const scopes = visibleScopes(db, scopeInfo)
@@ -148,6 +150,9 @@ export async function recall(db, cfg, query, scopeInfo = {}, embedFn = null) {
   )
 
   const tokens = selected.reduce((sum, s) => sum + Math.ceil((s.memory.summary.length + 24) / 3), 0)
+
+  // 性能监控（方案 A）：0.5ms 开销，方便 debug 趋势
+  recordRecallPerf(db, Date.now() - _t0)
 
   return {
     entries: selected.map((s) => s.memory),

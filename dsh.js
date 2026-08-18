@@ -18,7 +18,7 @@ import {
   upsertMemory, getMemory, listMemories, saveMessageOnce, getStats, setStatus, touchMemory,
   resolveProjectId, projectLabel, getUnextracted,
   analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary,
-  getDashboardStats,
+  getDashboardStats, getRecallPerf,
 } from './src/store.js'
 import { recall, markAccessed } from './src/recall.js'
 import { buildIdentityCard, formatRecall, formatList } from './src/inject.js'
@@ -635,6 +635,7 @@ export function apply(ctx, input = {}) {
       const top = Math.max(1, Math.min(50, Number(args.topLimit ?? 10)))
       const days = Math.max(1, Math.min(90, Number(args.recentDays ?? 7)))
       const s = getDashboardStats(db, { topLimit: top, recentDays: days })
+      const p = getRecallPerf(db)
       const lines = []
       lines.push(`=== 跨会话仪表盘 ===`)
       lines.push(`· 体量`)
@@ -645,6 +646,9 @@ export function apply(ctx, input = {}) {
       lines.push(`  最近 ${days} 天活跃: ${s.health.recentlyActivePct}%`)
       lines.push(`  平均 importance: ${s.health.avgImportance}`)
       lines.push(`  待审判 (candidate): ${s.health.candidatesPending}`)
+      lines.push(`· Recall 性能 (${p.windowSize} 样本)`)
+      lines.push(`  last=${p.last}ms avg=${p.avg}ms P50=${p.p50}ms P95=${p.p95}ms P99=${p.p99}ms`)
+      lines.push(`  累计 ${p.count} 次`)
       lines.push(`· Top ${top} 访问频率`)
       for (const m of s.topAccessed) {
         lines.push(`  [${m.kind}|acc=${m.access_count}|imp=${m.importance.toFixed(2)}] ${m.summary?.slice(0, 40) ?? ''}`)
