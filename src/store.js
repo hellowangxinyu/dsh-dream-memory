@@ -98,13 +98,24 @@ function normalizeUrlCore(input) {
   return `${parsed.hostname.toLowerCase()}${port}${path}`
 }
 
+const gitRemoteCache = new Map() // cwd -> remote url（进程级缓存，避免重复 spawn git）
+
 function mainRemote(cwd) {
+  if (gitRemoteCache.has(cwd)) return gitRemoteCache.get(cwd)
   const url = runGit(['remote', 'get-url', 'origin'], cwd) ?? runGit(['config', '--get', 'remote.origin.url'], cwd)
-  if (url) return url
+  if (url) {
+    gitRemoteCache.set(cwd, url)
+    return url
+  }
   const names = runGit(['remote'], cwd) ?? ''
   const first = names.split('\n').map((n) => n.trim()).filter(Boolean)[0]
-  if (!first) return undefined
-  return runGit(['remote', 'get-url', first], cwd) ?? runGit(['config', '--get', `remote.${first}.url`], cwd)
+  if (!first) {
+    gitRemoteCache.set(cwd, undefined)
+    return undefined
+  }
+  const result = runGit(['remote', 'get-url', first], cwd) ?? runGit(['config', '--get', `remote.${first}.url`], cwd)
+  gitRemoteCache.set(cwd, result)
+  return result
 }
 
 export function resolveProjectId(cwd) {

@@ -33,6 +33,30 @@ function sessionKey(id) {
   return `${HOST}:${String(id)}`
 }
 
+// 简单的 summary ↔ content trigram Jaccard，用于 dm_remember 软警告
+function jaccardSummaryContent(summary, content) {
+  if (!summary || !content) return 1
+  const isCjk = (c) => c >= '\u4e00' && c <= '\u9fff'
+  const tokenize = (text) => {
+    const out = new Set()
+    const s = String(text).replace(/\s+/g, '')
+    for (let i = 0; i < s.length - 2; i++) {
+      const g = s.slice(i, i + 3)
+      if (isCjk(g[0]) && isCjk(g[1]) && isCjk(g[2])) out.add(g)
+    }
+    for (const w of String(text).match(/[A-Za-z][A-Za-z0-9_-]{2,}/g) || []) {
+      out.add(w.toLowerCase())
+    }
+    return out
+  }
+  const a = tokenize(summary)
+  const b = tokenize(content)
+  if (!a.size || !b.size) return 1
+  let inter = 0
+  for (const t of a) if (b.has(t)) inter++
+  return inter / (a.size + b.size - inter)
+}
+
 function textBlocks(content) {
   if (!Array.isArray(content)) return typeof content === 'string' ? content : ''
   const parts = []
@@ -460,7 +484,19 @@ export function apply(ctx, input = {}) {
           .run(`e-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
             memory.id, 'user_quote', String(args.evidence), String(args.content).slice(0, 300), Date.now())
       }
-      return isNew ? `已写入记忆 ${memory.id}（${memory.kind}）` : `合并到已有记忆 ${memory.id}（validated=${memory.validatedCount}）`
+
+      // 软警告：summary↔content Jaccard < 0.1 时打日志 + 在 return 字符串提示
+      // 不阻断写入，由 agent 决定是否重写
+      let lowJaccardWarn = ''
+      if (args.summary && memory.content) {
+        const j = jaccardSummaryContent(String(args.summary), String(memory.content))
+        if (j < 0.1) {
+          ctx.logger?.warn(`[dsh-dream-memory] dm_remember low-Jaccard j=${j.toFixed(3)} mid=${memory.id} summary=${JSON.stringify(args.summary).slice(0, 60)}`)
+          lowJaccardWarn = `\n⚠ summary 与 content 关键词重合度低 (Jaccard=${j.toFixed(3)})，未来 FTS 召回可能困难，建议补充具体词。`
+        }
+      }
+
+      return (isNew ? `已写入记忆 ${memory.id}（${memory.kind}）` : `合并到已有记忆 ${memory.id}（validated=${memory.validatedCount}）`) + lowJaccardWarn
     },
   })
 
