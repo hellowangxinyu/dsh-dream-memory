@@ -1,6 +1,6 @@
 {
   "name": "dsh-dream-memory",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH 长期记忆插件：SQLite + FTS5 + 知识图谱 + 梦境整理。记得住、记得多、记得久，按需召回，上下文开销恒定。",
   "type": "module",
   "main": "dsh.js",
