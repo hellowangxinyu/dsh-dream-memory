@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { openDb } from '../src/db.js'
-import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary, decayStaleMemories, mergeSimilarMemories, getDashboardStats, touchMemory, recordRecallPerf, getRecallPerf } from '../src/store.js'
+import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary, decayStaleMemories, mergeSimilarMemories, getDashboardStats, touchMemory, recordRecallPerf, getRecallPerf, listMemories } from '../src/store.js'
 import { recall } from '../src/recall.js'
 import { importLegacy, parseLegacyEntry, importHermesWorkspace, parseMarkdownSections } from '../src/migrate.js'
 
@@ -311,6 +311,56 @@ test('upsertMemory：kind 自动推断 tier', () => {
   // 显式覆盖
   const override = upsertMemory(db, { kind: 'profile', scope: 'global', content: 'o', tier: 'working' })
   assert.equal(override.memory.tier, 'working', '显式 tier 应覆盖推断')
+})
+
+// ─── Tier-aware recall injection ──────────────────────────────
+
+test('formatRecall：identity tier 不重复注入（已走 identity card）', async () => {
+  // 用 import() 拿 inject 模块（独立导入避免污染测试全局）
+  const { formatRecall } = await import('../src/inject.js')
+  const entries = [
+    { id: 'ID-ID-001', kind: 'profile', tier: 'identity', importance: 0.85, summary: '老大在山东临沂' },
+    { id: 'KN-FACT-001', kind: 'fact', tier: 'knowledge', importance: 0.7, summary: '中文回复详细+技术说明先结构图示' },
+    { id: 'WK-TASK-001', kind: 'task', tier: 'working', importance: 0.6, summary: '当前调研 ERP 财务模块' },
+  ]
+  const r = formatRecall(entries, [], { recallMaxChars: 1500 })
+  // identity 不应出现在 recall block（已在 identity card）
+  assert.ok(!r.text.includes('ID-ID-001'), 'identity tier 不应注入 recall block')
+  assert.ok(r.text.includes('KN-FACT-001'), 'knowledge tier 应注入')
+  assert.ok(r.text.includes('WK-TASK-001'), 'working tier score 够高时应注入')
+})
+
+test('formatRecall：working tier score 低时不注入', async () => {
+  const { formatRecall } = await import('../src/inject.js')
+  const entries = [
+    { id: 'a', kind: 'task', tier: 'working', importance: 0.6, summary: '弱相关 task', score: 0.3 },
+  ]
+  const r = formatRecall(entries, [], { recallMaxChars: 1500 })
+  assert.equal(r.text, '', 'working tier score<0.5 应被过滤')
+})
+
+test('listMemories：tier 过滤', () => {
+  upsertMemory(db, { kind: 'profile', scope: 'global', content: 'i1' })
+  upsertMemory(db, { kind: 'fact', scope: 'global', content: 'k1' })
+  upsertMemory(db, { kind: 'task', scope: 'global', content: 'w1' })
+  const identities = listMemories(db, { tier: 'identity', status: 'active', limit: 10 })
+  const knowledge = listMemories(db, { tier: 'knowledge', status: 'active', limit: 10 })
+  const working = listMemories(db, { tier: 'working', status: 'active', limit: 10 })
+  assert.ok(identities.every((m) => m.tier === 'identity'))
+  assert.ok(knowledge.every((m) => m.tier === 'knowledge'))
+  assert.ok(working.every((m) => m.tier === 'working'))
+  assert.ok(identities.length >= 1)
+  assert.ok(knowledge.length >= 1)
+  assert.ok(working.length >= 1)
+})
+
+test('buildIdentityCard：用 tier=identity 而不是 kind=profile', async () => {
+  const { buildIdentityCard } = await import('../src/inject.js')
+  upsertMemory(db, { kind: 'profile', scope: 'global', content: '老大住在临沂', importance: 0.9 })
+  upsertMemory(db, { kind: 'fact', scope: 'global', content: '山东临沂是中国涂料产业集中地', importance: 0.9 })
+  const card = buildIdentityCard(db, { projectId: null, branch: null, label: null }, { identityMaxChars: 1500, identityMaxEntries: 5 })
+  assert.ok(card.includes('临沂'), 'identity card 应包含 profile 记忆')
+  assert.ok(!card.includes('涂料产业'), 'identity card 不应包含 knowledge fact（避免污染）')
 })
 
 // ─── mergeSimilarMemories 让库保持高效简洁 ─────────────────────────────

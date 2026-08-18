@@ -289,12 +289,13 @@ export function touchMemory(db, id) {
     .run(Date.now(), newImportance, id)
 }
 
-export function listMemories(db, { kind, scope, status = 'active', projectId, limit = 50, since, until, filter, recent = false } = {}) {
+export function listMemories(db, { kind, scope, status = 'active', projectId, tier, limit = 50, since, until, filter, recent = false } = {}) {
   const where = []
   const args = []
   if (kind) { where.push('kind=?'); args.push(kind) }
   if (scope) { where.push('scope=?'); args.push(scope) }
   if (projectId) { where.push('project_id=?'); args.push(projectId) }
+  if (tier) { where.push('tier=?'); args.push(tier) }
   if (status) { where.push('status=?'); args.push(status) }
   if (since != null) { where.push('created_at>=?'); args.push(since) }
   if (until != null) { where.push('created_at<=?'); args.push(until) }

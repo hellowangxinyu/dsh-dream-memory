@@ -43,13 +43,22 @@ const EXTRACT_SYS = `你是 dsh-dream-memory 的梦境整理引擎，从 AI Agen
    - PREFERENCE：用户的稳定偏好或工作习惯（需明显、非单次偶发）
    - DECISION：用户拍板或双方确认的决策
 2. 节点字段（缺一不可）：
-   { "type": "...", "name": "kebab-case 规范名，全小写，可含中文", "description": "一句话触发场景", "content": "按类型用纯文本模板写清楚，≤300字" }
+   { "type": "...", "name": "kebab-case 规范名，全小写，可含中文", "description": "一句话触发场景", "content": "按类型用纯文本模板写清楚，≤300字", "tier": "identity|knowledge|working" }
    已有节点列表会给出，同一事物必须复用已有 name，不得创建重复节点。
    description 必须是「可被中文 trigram FTS 命中」的具体词组合，禁止：
    - 抽象标题（如「持久性优先」「中文优先」单独使用，无具体名词）
    - 2 字以下的主题词（如「偏好」「习惯」会被判定为标签型记忆）
    - 不出现在 content 中的关键词
    自检：写完 description 后，用 description 做 query 能否召回本条 content？若不能，重写。
+
+2b. tier 分类（必填，三选一）：
+   - identity：用户身份/画像（姓名、地点、角色、稳定偏好、车、车型）。变与不变都属 identity，只要 90 天后还有效就 identity。
+     例：「老大在山东临沂」「用户主力 Java+Python」「老大用 PHEV 混动版钛7」
+   - knowledge：长期知识（技能、原则、决策、教训、可复用方法、稳定事实）。跨会话能用就 knowledge。
+     例：「侧边栏面板 loading 时检查 renderPanel 异步」「老大要求纯文字 PRD 不要 mermaid」
+   - working：短期/会话上下文（当前任务、最近事件、当下场景）。14 天内不再用就可以扔。
+     例：「当前正在调研 ERP 财务模块」「今天老大要买鞋」
+   规则：犹豫就问自己「90 天后还会用到吗？」是 → knowledge 或 identity；否 → working。
 3. 边类型（只允许这 6 个，且遵守方向）：
    USED_SKILL: TASK -> SKILL（任务用了某技能）
    SOLVED_BY: EVENT|SKILL|TASK -> SKILL（问题被某技能解决）
@@ -137,8 +146,18 @@ export async function runDream(db, cfg, scopeInfo, complete, log = () => {}) {
     const existingByName = name ? findByName(db, name, { kind, scope }) : null
     if (existingByName) nameToId.set(name, existingByName.id)
 
+    // tier 校验：dream 提取时由 LLM 决定 tier；非法值 fallback 到 kind 默认
+    const VALID_TIERS = new Set(['identity', 'knowledge', 'working'])
+    const tierRaw = String(node.tier ?? '').toLowerCase().trim()
+    const tier = VALID_TIERS.has(tierRaw) ? tierRaw : (
+      kind === 'profile' ? 'identity'
+      : ['task', 'event', 'log'].includes(kind) ? 'working'
+      : 'knowledge'
+    )
+
     const { memory } = upsertMemory(db, {
       kind,
+      tier,  // 显式传递 tier，覆盖 kind 默认推断
       layer: kind === 'event' || kind === 'task' ? 1 : 2,
       scope,
       projectId: scopeInfo.projectId ?? null,
