@@ -495,3 +495,94 @@ export function getStats(db) {
     byKind,
   }
 }
+
+// ─── 记忆质量分析 + 整理（consolidation）────────────────────────────────
+
+// 中文 trigram tokens + 拉丁词 token，复用 dsh.js 里的 jaccard 算法的纯函数版
+function isCjkChar(c) {
+  return c >= '\u4e00' && c <= '\u9fff'
+}
+function tokenizeCjk(text) {
+  const out = new Set()
+  const s = String(text || '').replace(/\s+/g, '')
+  for (let i = 0; i < s.length - 2; i++) {
+    const g = s.slice(i, i + 3)
+    if (isCjkChar(g[0]) && isCjkChar(g[1]) && isCjkChar(g[2])) out.add(g)
+  }
+  for (const w of String(text || '').match(/[A-Za-z][A-Za-z0-9_-]{2,}/g) || []) {
+    out.add(w.toLowerCase())
+  }
+  return out
+}
+function jaccardTokens(a, b) {
+  if (!a.size || !b.size) return 1
+  let inter = 0
+  for (const t of a) if (b.has(t)) inter++
+  return inter / (a.size + b.size - inter)
+}
+
+// 扫描 active 记忆，返回{
+//   labels: 候选 label-only（summary 短且不在 content 中）
+//   vague:  候选模糊 summary（jaccard < threshold）
+//   archives: 当前 status='archived' 数量
+// }
+export function analyzeMemoryQuality(db, { jaccardThreshold = 0.1, labelMaxLen = 8, kinds = null } = {}) {
+  const scope = kinds ? `AND kind IN (${kinds.map(() => '?').join(',')})` : ''
+  const params = kinds || []
+  const rows = db.prepare(`
+    SELECT id, kind, name, summary, content, importance
+    FROM memories WHERE status='active' ${scope}
+  `).all(...params)
+
+  const labels = []
+  const vague = []
+  for (const r of rows) {
+    const summary = r.summary || ''
+    const content = r.content || ''
+    // label-only：summary 短 + 全 CJK + 不在 content 中
+    if (summary.length > 0 && summary.length <= labelMaxLen
+        && !/[^\u4e00-\u9fff]/.test(summary)
+        && ![...summary].every((ch) => content.includes(ch))) {
+      labels.push({ id: r.id, kind: r.kind, summary, reason: 'label-only' })
+      continue
+    }
+    // 模糊：jaccard < threshold 且 summary 非空
+    if (summary && content) {
+      const j = jaccardTokens(tokenizeCjk(summary), tokenizeCjk(content))
+      if (j < jaccardThreshold) {
+        vague.push({ id: r.id, kind: r.kind, summary, jaccard: Number(j.toFixed(3)), reason: 'low-jaccard' })
+      }
+    }
+  }
+  const archives = db.prepare("SELECT COUNT(*) n FROM memories WHERE status='archived'").get().n
+  return { labels, vague, archives, scanned: rows.length }
+}
+
+// 把记忆 status 设为 archived（理由写入 source_refs 末尾）
+// 与 file 上半的 archiveMemory(db, id) 共存：这个版本带 reason 字段
+// 上面的用于兼容旧调用，新 consolidation 走这个
+export function archiveMemoryWithReason(db, id, reason = 'manual') {
+  const r = db.prepare('SELECT status, source_refs FROM memories WHERE id=?').get(id)
+  if (!r) return { ok: false, error: 'not-found' }
+  if (r.status === 'archived') return { ok: false, error: 'already-archived' }
+  const refs = (() => {
+    try { return JSON.parse(r.source_refs || '[]') } catch { return [] }
+  })()
+  refs.push({ archive: reason, at: Date.now() })
+  db.prepare("UPDATE memories SET status='archived', source_refs=?, updated_at=? WHERE id=?")
+    .run(JSON.stringify(refs), Date.now(), id)
+  return { ok: true }
+}
+
+// 重写 summary，保留 content 自带的 content_hash（不变）
+export function updateMemorySummary(db, id, newSummary) {
+  if (!newSummary || !String(newSummary).trim()) return { ok: false, error: 'empty-summary' }
+  const r = db.prepare('SELECT summary FROM memories WHERE id=?').get(id)
+  if (!r) return { ok: false, error: 'not-found' }
+  db.prepare('UPDATE memories SET summary=?, updated_at=? WHERE id=?')
+    .run(String(newSummary).slice(0, 1000), Date.now(), id)
+  return { ok: true }
+}
+
+// 暴露给 synchronize 也用
+export { tokenizeCjk, jaccardTokens, isCjkChar }

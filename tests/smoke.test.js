@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { openDb } from '../src/db.js'
-import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats } from '../src/store.js'
+import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary } from '../src/store.js'
 import { recall } from '../src/recall.js'
 import { importLegacy, parseLegacyEntry, importHermesWorkspace, parseMarkdownSections } from '../src/migrate.js'
 
@@ -149,6 +149,76 @@ test('Jaccard 软警告阈值：2 字 label 视为无词（不警告）', () => 
 test('Jaccard 空输入视为 1（不警告）', () => {
   assert.equal(jaccardHelper('', '任何内容'), 1)
   assert.equal(jaccardHelper('任何摘要', ''), 1)
+})
+
+// ─── consolidation helpers ─────────────────────────────────────────
+
+test('analyzeMemoryQuality：label-only 与模糊摘要识别', () => {
+  // 制造 1 条 label-only（短 + 不在 content 中）
+  upsertMemory(db, {
+    kind: 'fact', scope: 'global',
+    summary: '偏好',
+    content: '中文回复要详细,技术说明先给结构图示再展开论据',
+  })
+  // 制造 1 条低 jaccard 模糊摘要（>8 字避开 label-only 路径）
+  upsertMemory(db, {
+    kind: 'decision', scope: 'global',
+    summary: '老大对回复风格的一贯要求',
+    content: '中文回复要详细,技术说明先给结构图示再展开论据',
+  })
+  // 制造 1 条高质量摘要（不应被命中）
+  upsertMemory(db, {
+    kind: 'skill', scope: 'global',
+    summary: '中文回复详细+技术说明先结构图示',
+    content: '中文回复要详细,技术说明先给结构图示再展开论据',
+  })
+  const r = analyzeMemoryQuality(db, { jaccardThreshold: 0.1, labelMaxLen: 8 })
+  assert.ok(r.labels.length >= 1, `label-only 应至少 1 条 实际 ${r.labels.length}`)
+  assert.ok(r.vague.length >= 1, `模糊摘要应至少 1 条 实际 ${r.vague.length}`)
+})
+
+test('analyzeMemoryQuality：高质量摘要不进入 candidates', () => {
+  upsertMemory(db, {
+    kind: 'skill', scope: 'global',
+    summary: '中文回复详细+技术说明先结构图示',
+    content: '中文回复要详细,技术说明先给结构图示再展开论据',
+  })
+  const r = analyzeMemoryQuality(db, { jaccardThreshold: 0.1, labelMaxLen: 8 })
+  // 高质量摘要不应出现在 labels 或 vague 里
+  const matched = [...r.labels, ...r.vague].find((x) => x.summary.includes('中文回复详细'))
+  assert.equal(matched, undefined)
+})
+
+test('archiveMemoryWithReason：归档后 status 变 archived 且 reason 写入 source_refs', () => {
+  const a = upsertMemory(db, { kind: 'fact', scope: 'global', content: '归档测试内容' })
+  assert.equal(a.memory.status, 'active')
+  const r = archiveMemoryWithReason(db, a.memory.id, 'test:archive')
+  assert.equal(r.ok, true)
+  const after = db.prepare('SELECT status, source_refs FROM memories WHERE id=?').get(a.memory.id)
+  assert.equal(after.status, 'archived')
+  assert.ok(after.source_refs.includes('test:archive'))
+  // 重复归档应失败
+  const r2 = archiveMemoryWithReason(db, a.memory.id, 'test:dup')
+  assert.equal(r2.ok, false)
+})
+
+test('updateMemorySummary：重写 summary 保留 content 不变', () => {
+  const a = upsertMemory(db, {
+    kind: 'skill', scope: 'global',
+    summary: '原始摘要',
+    content: '中文回复要详细,技术说明先给结构图示再展开论据',
+  })
+  const r = updateMemorySummary(db, a.memory.id, '中文回复详细+技术说明先结构图示')
+  assert.equal(r.ok, true)
+  const after = db.prepare('SELECT summary, content FROM memories WHERE id=?').get(a.memory.id)
+  assert.equal(after.summary, '中文回复详细+技术说明先结构图示')
+  assert.equal(after.content, '中文回复要详细,技术说明先给结构图示再展开论据')
+})
+
+test('updateMemorySummary：拒绝空字符串', () => {
+  const a = upsertMemory(db, { kind: 'fact', scope: 'global', content: '测试内容' })
+  const r = updateMemorySummary(db, a.memory.id, '')
+  assert.equal(r.ok, false)
 })
 
 test.after(() => {
