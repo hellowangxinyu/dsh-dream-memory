@@ -101,55 +101,9 @@ test('Markdown 小节解析', () => {
   assert.deepEqual(sections.map((s) => s.heading), ['A', 'B'])
 })
 
-// summary↔content Jaccard 三档：
-//  - 高度匹配（具体词全部在 content 里）→ 应 > 0.2
-//  - 模糊摘要（label-only）→ 应 < 0.1
-//  - 完全空 → 视为 1（无警告）
-// 实际函数定义在 dsh.js，由于它依赖 ctx.logger 注入，这里复刻一份测试其纯逻辑
-function jaccardHelper(summary, content) {
-  if (!summary || !content) return 1
-  const isCjk = (c) => c >= '\u4e00' && c <= '\u9fff'
-  const tokenize = (text) => {
-    const out = new Set()
-    const s = String(text).replace(/\s+/g, '')
-    for (let i = 0; i < s.length - 2; i++) {
-      const g = s.slice(i, i + 3)
-      if (isCjk(g[0]) && isCjk(g[1]) && isCjk(g[2])) out.add(g)
-    }
-    for (const w of String(text).match(/[A-Za-z][A-Za-z0-9_-]{2,}/g) || []) {
-      out.add(w.toLowerCase())
-    }
-    return out
-  }
-  const a = tokenize(summary)
-  const b = tokenize(content)
-  if (!a.size || !b.size) return 1
-  let inter = 0
-  for (const t of a) if (b.has(t)) inter++
-  return inter / (a.size + b.size - inter)
-}
-
-test('Jaccard 软警告阈值：模糊摘要触发', () => {
-  // 模糊摘要：12 字符的抽象标题，与 content 关键词零重叠
-  const j1 = jaccardHelper('老大对回复风格的一贯要求', '中文回复，详细，技术说明先给结构图示再展开论据')
-  assert.ok(j1 < 0.1, `模糊摘要应触发警告 j=${j1}`)
-})
-
-test('Jaccard 软警告阈值：具体词摘要不触发', () => {
-  const j2 = jaccardHelper('中文回复详细技术说明先结构图示', '中文回复，详细，技术说明先结构图示再展开论据')
-  assert.ok(j2 > 0.2, `具体词摘要应通过 j=${j2}`)
-})
-
-test('Jaccard 软警告阈值：2 字 label 视为无词（不警告）', () => {
-  // 2 字符无法生成 trigram，无 token → 返回 1（不警告）
-  // 这是 by design：单字词不该误伤
-  assert.equal(jaccardHelper('偏好', '任何内容'), 1)
-})
-
-test('Jaccard 空输入视为 1（不警告）', () => {
-  assert.equal(jaccardHelper('', '任何内容'), 1)
-  assert.equal(jaccardHelper('任何摘要', ''), 1)
-})
+// "无感" 原则：dm_remember 不再触发 Jaccard 自检，避免每次写入 1ms 延迟
+// Jaccard 逻辑只在 dm_consolidate audit 时跑（明确触发），不污染写入路径
+// 这里不再测试 jaccardHelper；保留 consolidation 路径的测试
 
 // ─── consolidation helpers ─────────────────────────────────────────
 

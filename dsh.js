@@ -34,30 +34,6 @@ function sessionKey(id) {
   return `${HOST}:${String(id)}`
 }
 
-// 简单的 summary ↔ content trigram Jaccard，用于 dm_remember 软警告
-function jaccardSummaryContent(summary, content) {
-  if (!summary || !content) return 1
-  const isCjk = (c) => c >= '\u4e00' && c <= '\u9fff'
-  const tokenize = (text) => {
-    const out = new Set()
-    const s = String(text).replace(/\s+/g, '')
-    for (let i = 0; i < s.length - 2; i++) {
-      const g = s.slice(i, i + 3)
-      if (isCjk(g[0]) && isCjk(g[1]) && isCjk(g[2])) out.add(g)
-    }
-    for (const w of String(text).match(/[A-Za-z][A-Za-z0-9_-]{2,}/g) || []) {
-      out.add(w.toLowerCase())
-    }
-    return out
-  }
-  const a = tokenize(summary)
-  const b = tokenize(content)
-  if (!a.size || !b.size) return 1
-  let inter = 0
-  for (const t of a) if (b.has(t)) inter++
-  return inter / (a.size + b.size - inter)
-}
-
 function textBlocks(content) {
   if (!Array.isArray(content)) return typeof content === 'string' ? content : ''
   const parts = []
@@ -486,38 +462,28 @@ export function apply(ctx, input = {}) {
             memory.id, 'user_quote', String(args.evidence), String(args.content).slice(0, 300), Date.now())
       }
 
-      // 软警告：summary↔content Jaccard < 0.1 时打日志 + 在 return 字符串提示
-      // 不阻断写入，由 agent 决定是否重写
-      let lowJaccardWarn = ''
-      if (args.summary && memory.content) {
-        const j = jaccardSummaryContent(String(args.summary), String(memory.content))
-        if (j < 0.1) {
-          ctx.logger?.warn(`[dsh-dream-memory] dm_remember low-Jaccard j=${j.toFixed(3)} mid=${memory.id} summary=${JSON.stringify(args.summary).slice(0, 60)}`)
-          lowJaccardWarn = `\n⚠ summary 与 content 关键词重合度低 (Jaccard=${j.toFixed(3)})，未来 FTS 召回可能困难，建议补充具体词。`
-        }
-      }
-
-      return (isNew ? `已写入记忆 ${memory.id}（${memory.kind}）` : `合并到已有记忆 ${memory.id}（validated=${memory.validatedCount}）`) + lowJaccardWarn
+      return isNew ? `已写入记忆 ${memory.id}（${memory.kind}）` : `合并到已有记忆 ${memory.id}（validated=${memory.validatedCount}）`
     },
   })
 
-  // dm_consolidate：记忆整理（归档 label-only + 重写模糊 summary），
-  // 让梦境系统自己执行历史记忆的批量清理/重写，不要 raw SQL 改 DB
+  // dm_consolidate：记忆整理（仅 audit + archive）。
+  // 设计原则：插件本身不调用 LLM，避免拖累 token 速度。
+  // 不暴露 rewrite 模式——重写是 agent / 用户的事，靠单独 dm_remember 写回，
+  // 插件只负责"识别哪些需要重写"和"归档不再需要的"。
   ctx.tools.register({
     name: 'dm_consolidate',
-    description: '记忆整理：扫描现有 active 记忆，识别标签型（Jaccard=0 或 label-only）和模糊摘要（Jaccard<阈值），按 mode 归档 or 由 LLM 重写 summary',
+    description: '记忆整理：扫描现有 active 记忆，识别标签型（label-only）和模糊摘要（Jaccard<阈值），按 mode 归档。不调用 LLM',
     parameters: {
       type: 'object',
       properties: {
-        mode: { type: 'string', enum: ['audit', 'archive', 'rewrite', 'all'], description: 'audit=只报告; archive=归档 label-only; rewrite=重写模糊 summary 需 LLM; all=两者都做', default: 'audit' },
+        mode: { type: 'string', enum: ['audit', 'archive'], description: 'audit=只报告; archive=归档 label-only', default: 'audit' },
         dryRun: { type: 'boolean', description: 'true=不实际改动只报告，默认 true', default: true },
         jaccardThreshold: { type: 'number', description: 'Jaccard 阈值，低于此视为模糊', default: 0.1 },
         labelMaxLen: { type: 'number', description: 'label-only 摘要最大长度', default: 8 },
-        kinds: { type: 'string', description: '可选：逗号分隔的 kind 过滤，如 "decision,preference,skill"', default: '' },
+        kinds: { type: 'string', description: '可选：逗号分隔的 kind 过滤', default: '' },
       },
     },
-    execute: async (args, exec) => {
-      const agent = agentOf(exec)
+    execute: async (args) => {
       const kindsFilter = args.kinds ? String(args.kinds).split(',').map(s => s.trim()).filter(Boolean) : null
       const analysis = analyzeMemoryQuality(db, {
         jaccardThreshold: args.jaccardThreshold ?? 0.1,
@@ -542,64 +508,33 @@ export function apply(ctx, input = {}) {
         for (const l of analysis.labels.slice(0, 20)) {
           lines.push(`  ${l.id} [${l.kind}] ${JSON.stringify(l.summary)}`)
         }
-        lines.push('【模糊摘要 候选】')
+        lines.push('【模糊摘要 候选 - 需 agent 重写】')
         for (const v of analysis.vague.slice(0, 20)) {
           lines.push(`  ${v.id} [${v.kind}] j=${v.jaccard} ${JSON.stringify(v.summary).slice(0, 60)}`)
         }
-        return lines.join('\n') + `\n提示：mode=archive|rewrite|all 才会实际改动。`
+        return lines.join('\n') + `\n提示：mode=archive 才会实际改动；模糊摘要需 agent 单独 dm_remember 重写。`
       }
 
-      // 实际改动
-      if (args.dryRun !== false) {
-        return lines.join('\n') + `\n[dry-run] 实际未改动，传 dryRun=false 才会执行。`
-      }
-
-      let archived = 0
-      let rewritten = 0
-      const errors = []
-
-      if (args.mode === 'archive' || args.mode === 'all') {
+      if (args.mode === 'archive') {
+        if (args.dryRun !== false) {
+          return lines.join('\n') + `\n[dry-run] 实际未改动，传 dryRun=false 才会执行。`
+        }
+        let archived = 0
+        const errors = []
         for (const l of analysis.labels) {
           const r = archiveMemoryWithReason(db, l.id, 'consolidate:label-only')
           if (r.ok) archived++
           else errors.push(`${l.id}: ${r.error}`)
         }
-      }
-
-      if (args.mode === 'rewrite' || args.mode === 'all') {
-        if (!agent) {
-          errors.push('rewrite 模式需要 agent 上下文以调用 LLM')
-        } else {
-          const candidates = analysis.vague
-          for (const v of candidates) {
-            const m = db.prepare('SELECT content FROM memories WHERE id=?').get(v.id)
-            if (!m || !m.content) continue
-            try {
-              const sys = '你是 dsh-dream-memory 的记忆整理引擎。给定一条记忆的 content，请写出 30-60 字的 summary。要求：包含至少 3 个可被中文 trigram FTS 命中的具体词，禁止抽象标题。'
-              const user = `content:\n${String(m.content).slice(0, 1500)}\n\n旧 summary: ${JSON.stringify(v.summary)}\n\n只输出新 summary，不要其他文字。`
-              const newSummary = String(await complete(latestRoute.get(String(agent.id)), sys, user) || '').trim().slice(0, 200)
-              if (newSummary && newSummary.length > 4) {
-                const r = updateMemorySummary(db, v.id, newSummary)
-                if (r.ok) rewritten++
-                else errors.push(`${v.id}: ${r.error}`)
-              } else {
-                errors.push(`${v.id}: LLM-empty-response`)
-              }
-            } catch (err) {
-              errors.push(`${v.id}: ${err?.message ?? err}`)
-            }
-          }
+        lines.push('---')
+        lines.push(` 归档: ${archived} 条`)
+        if (errors.length) {
+          lines.push(` 错误: ${errors.length} 条`)
+          for (const er of errors.slice(0, 5)) lines.push(`    - ${er}`)
         }
+        return lines.join('\n')
       }
 
-      lines.push('---')
-      lines.push(`执行结果:`)
-      lines.push(`  归档: ${archived} 条`)
-      lines.push(`  重写: ${rewritten} 条`)
-      if (errors.length) {
-        lines.push(`  错误: ${errors.length} 条`)
-        for (const er of errors.slice(0, 5)) lines.push(`    - ${er}`)
-      }
       return lines.join('\n')
     },
   })
