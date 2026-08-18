@@ -18,6 +18,7 @@ import {
   upsertMemory, getMemory, listMemories, saveMessageOnce, getStats, setStatus, touchMemory,
   resolveProjectId, projectLabel, getUnextracted,
   analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary,
+  getDashboardStats,
 } from './src/store.js'
 import { recall, markAccessed } from './src/recall.js'
 import { buildIdentityCard, formatRecall, formatList } from './src/inject.js'
@@ -616,6 +617,47 @@ export function apply(ctx, input = {}) {
         `FTS: ${stats.ftsMode}\n` +
         `类型分布: ${JSON.stringify(stats.byKind)}\n` +
         `旧记忆迁移: ${getMeta(db, 'legacy_import') ?? '无'}`
+    },
+  })
+
+  // 跨会话记忆统计仪表盘（更详细）
+  ctx.tools.register({
+    name: 'dm_stats_extended',
+    description: '跨会话仪表盘：库体量、健康度、Top 访问、Top 重要、最近 7 天新增、知识图谱统计',
+    parameters: {
+      type: 'object',
+      properties: {
+        topLimit: { type: 'number', description: 'Top N 访问/重要各显示多少条', default: 10, min: 1, max: 50 },
+        recentDays: { type: 'number', description: '最近多少天的新增统计', default: 7, min: 1, max: 90 },
+      },
+    },
+    execute: async (args) => {
+      const top = Math.max(1, Math.min(50, Number(args.topLimit ?? 10)))
+      const days = Math.max(1, Math.min(90, Number(args.recentDays ?? 7)))
+      const s = getDashboardStats(db, { topLimit: top, recentDays: days })
+      const lines = []
+      lines.push(`=== 跨会话仪表盘 ===`)
+      lines.push(`· 体量`)
+      lines.push(`  active ${s.totals.active} / archived ${s.totals.archived} / candidate ${s.totals.candidate} / total ${s.totals.total}`)
+      lines.push(`  图：${s.graph.edges} 边, ${s.graph.communities} 社区`)
+      lines.push(`· 健康度`)
+      lines.push(`  从未访问: ${s.health.neverAccessPct}%`)
+      lines.push(`  最近 ${days} 天活跃: ${s.health.recentlyActivePct}%`)
+      lines.push(`  平均 importance: ${s.health.avgImportance}`)
+      lines.push(`  待审判 (candidate): ${s.health.candidatesPending}`)
+      lines.push(`· Top ${top} 访问频率`)
+      for (const m of s.topAccessed) {
+        lines.push(`  [${m.kind}|acc=${m.access_count}|imp=${m.importance.toFixed(2)}] ${m.summary?.slice(0, 40) ?? ''}`)
+      }
+      lines.push(`· Top ${top} 重要性`)
+      for (const m of s.topImportance) {
+        lines.push(`  [${m.kind}|imp=${m.importance.toFixed(2)}|acc=${m.access_count}] ${m.summary?.slice(0, 40) ?? ''}`)
+      }
+      lines.push(`· 最近 ${days} 天新增`)
+      for (const r of s.recent) {
+        lines.push(`  ${r.d}: +${r.n}`)
+      }
+      return lines.join('\n')
     },
   })
 

@@ -261,8 +261,23 @@ export function archiveMemory(db, id) {
 }
 
 export function touchMemory(db, id) {
-  db.prepare('UPDATE memories SET access_count=access_count+1, last_accessed_at=? WHERE id=?')
-    .run(Date.now(), id)
+  // 每次访问：access_count += 1, last_accessed_at = now
+  // 重要性递增：cap 0.95（防止永远涨满），默认 0.05 / 访问
+  //  0.6 → 0.65 → 0.70 → 0.75 → 0.80 → 0.85 → 0.90 → 0.95 (7 次到顶)
+  // 不重复递增：如果 1 分钟内已 increment 跳过（防止高频召回导致 importance 飞涨）
+  const row = db.prepare('SELECT importance, last_accessed_at FROM memories WHERE id=?').get(id)
+  if (!row) return
+  const last = row.last_accessed_at || 0
+  if (Date.now() - last < 60_000) {
+    // 高频召回：只更新 access_count，不动 importance
+    db.prepare('UPDATE memories SET access_count=access_count+1, last_accessed_at=? WHERE id=?')
+      .run(Date.now(), id)
+    return
+  }
+  const newImportance = Math.min(0.95, Number(row.importance) + 0.05)
+  // 参数顺序：(last_accessed_at, importance, id)
+  db.prepare('UPDATE memories SET access_count=access_count+1, last_accessed_at=?, importance=? WHERE id=?')
+    .run(Date.now(), newImportance, id)
 }
 
 export function listMemories(db, { kind, scope, status = 'active', projectId, limit = 50, since, until, filter, recent = false } = {}) {
@@ -713,4 +728,67 @@ function mergeContent(a, b) {
   if (b.includes(a.slice(0, 100))) return b
   // 简单拼接 + 分隔
   return `${a}\n\n---\n\n${b}`
+}
+
+// ─── 跨会话统计仪表盘 ──────────────────────────────────
+
+// 返回实时统计：体量/健康/最近活动/Top 频繁访问/Top 重要
+export function getDashboardStats(db, { topLimit = 10, recentDays = 7 } = {}) {
+  const since = Date.now() - recentDays * 86400 * 1000
+  const byKind = {}
+  for (const r of db.prepare("SELECT kind, status, COUNT(*) AS n FROM memories GROUP BY kind, status").all()) {
+    byKind[r.kind] = byKind[r.kind] || { active: 0, archived: 0, candidate: 0 }
+    byKind[r.kind][r.status] = r.n
+  }
+
+  const totals = {
+    active: 0, archived: 0, candidate: 0, total: 0,
+  }
+  for (const row of db.prepare("SELECT status, COUNT(*) AS n FROM memories GROUP BY status").all()) {
+    totals[row.status] = row.n
+    totals.total += row.n
+  }
+
+  const health = {
+    neverAccessPct: 0,
+    recentlyActivePct: 0,
+    avgImportance: 0,
+    candidatesPending: 0,
+  }
+  const active = totals.active || 1
+  const neverAccessed = db.prepare("SELECT COUNT(*) n FROM memories WHERE status='active' AND last_accessed_at IS NULL").get().n
+  health.neverAccessPct = Math.round(neverAccessed / active * 100)
+  const recentlyActive = db.prepare("SELECT COUNT(*) n FROM memories WHERE status='active' AND last_accessed_at >= ?").get(since).n
+  health.recentlyActivePct = Math.round(recentlyActive / active * 100)
+  const avgImp = db.prepare("SELECT AVG(importance) a FROM memories WHERE status='active'").get()
+  health.avgImportance = avgImp?.a ? Number(avgImp.a.toFixed(3)) : 0
+  health.candidatesPending = db.prepare("SELECT COUNT(*) n FROM memories WHERE status='candidate'").get().n
+  // Top 10 访问频率
+  const topAccessed = db.prepare(`
+    SELECT id, kind, summary, access_count, importance, last_accessed_at
+    FROM memories WHERE status='active' AND access_count > 0
+    ORDER BY access_count DESC, last_accessed_at DESC LIMIT ?
+  `).all(topLimit)
+
+  // Top 10 重要性
+  const topImportance = db.prepare(`
+    SELECT id, kind, summary, importance, access_count
+    FROM memories WHERE status='active'
+    ORDER BY importance DESC, access_count DESC LIMIT ?
+  `).all(topLimit)
+
+  // 最近 N 天新增
+  const recent = db.prepare(`
+    SELECT DATE(created_at/1000, 'unixepoch') AS d, COUNT(*) AS n
+    FROM memories WHERE created_at >= ?
+    GROUP BY d ORDER BY d ASC
+  `).all(since)
+
+  // 知识图谱统计
+  const graph = {
+    edges: Number(db.prepare('SELECT COUNT(*) n FROM links').get().n ?? 0),
+    communities: Number(db.prepare('SELECT COUNT(DISTINCT community_id) n FROM memories WHERE community_id IS NOT NULL').get().n ?? 0),
+  }
+
+  return { totals, byKind, health, topAccessed, topImportance, recent, graph, generatedAt: Date.now() }
 }

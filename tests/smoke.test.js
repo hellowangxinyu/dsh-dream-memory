@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { openDb } from '../src/db.js'
-import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary, decayStaleMemories, mergeSimilarMemories } from '../src/store.js'
+import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary, decayStaleMemories, mergeSimilarMemories, getDashboardStats, touchMemory } from '../src/store.js'
 import { recall } from '../src/recall.js'
 import { importLegacy, parseLegacyEntry, importHermesWorkspace, parseMarkdownSections } from '../src/migrate.js'
 
@@ -306,6 +306,84 @@ test('mergeSimilarMemories：跨 kind 不合并', () => {
   const r = mergeSimilarMemories(db, { similarityThreshold: 0.5, maxBatch: 50 })
   // 跨 kind 不能合并
   assert.equal(r.merged, 0, `跨 kind 应不合并，实际 ${r.merged}`)
+})
+
+// ─── SLA 硬约束：recall 必须 0.5s 内返回 ──────────────────────────────
+
+test('recall SLA：100 条记忆下 recall < 500ms', () => {
+  // 灌 100 条记忆
+  for (let i = 0; i < 100; i++) {
+    upsertMemory(db, {
+      kind: 'fact', scope: 'global',
+      content: `测试记忆 ${i}，包含一些中文关键词如：编程框架、数据库表、API 接口、用户偏好、稳定版本`,
+      importance: 0.6,
+    })
+  }
+  // 跑 5 次取平均
+  const samples = []
+  for (let i = 0; i < 5; i++) {
+    const t0 = Date.now()
+    recall(db, { recallMaxNodes: 6, recallMaxDepth: 1 }, '编程框架', {}, null)
+    samples.push(Date.now() - t0)
+  }
+  const avg = samples.reduce((a, b) => a + b, 0) / samples.length
+  const max = Math.max(...samples)
+  console.log(`  recall 平均 ${avg.toFixed(1)}ms, 最大 ${max}ms`)
+  assert.ok(max < 500, `recall 最大耗时 ${max}ms 超过 SLA 500ms`)
+  assert.ok(avg < 200, `recall 平均耗时 ${avg.toFixed(1)}ms 偏高`)
+})
+
+// ─── 访问重要性递增 ─────────────────────────────────────────
+
+test('touchMemory：每次访问 importance +0.05，cap 0.95', () => {
+  const m = upsertMemory(db, { kind: 'fact', scope: 'global', content: '测访问递增', importance: 0.6 })
+  // 第一次访问（> 60s 后才能涨）
+  db.prepare('UPDATE memories SET last_accessed_at=? WHERE id=?').run(0, m.memory.id)
+  touchMemory(db, m.memory.id)
+  const after1 = db.prepare('SELECT importance, access_count, last_accessed_at FROM memories WHERE id=?').get(m.memory.id)
+  assert.equal(Number(after1.importance.toFixed(3)), 0.65, `第 1 次访问 importance 应 0.65，实际 ${after1.importance}`)
+  assert.equal(after1.access_count, 1)
+
+  // 第二次（间隔足够）
+  db.prepare('UPDATE memories SET last_accessed_at=? WHERE id=?').run(0, m.memory.id)
+  touchMemory(db, m.memory.id)
+  const after2 = db.prepare('SELECT importance FROM memories WHERE id=?').get(m.memory.id)
+  assert.equal(Number(after2.importance.toFixed(3)), 0.70)
+
+  // 高频防抖动：同一分钟内再次访问，importance 不涨
+  touchMemory(db, m.memory.id)
+  const after3 = db.prepare('SELECT importance, access_count FROM memories WHERE id=?').get(m.memory.id)
+  assert.equal(Number(after3.importance.toFixed(3)), 0.70, '一分钟内重复访问 importance 不涨')
+  assert.equal(after3.access_count, 3, '但 access_count 仍然 +1')
+
+  // 验证 cap 0.95
+  db.prepare('UPDATE memories SET importance=0.93, last_accessed_at=0 WHERE id=?').run(m.memory.id)
+  touchMemory(db, m.memory.id)
+  const after4 = db.prepare('SELECT importance FROM memories WHERE id=?').get(m.memory.id)
+  assert.equal(after4.importance, 0.95, 'importance 不超过 0.95')
+})
+
+// ─── 跨会话仪表盘 ─────────────────────────────────────────
+
+test('getDashboardStats：返回体量+健康+Top+最近', () => {
+  // 灌 5 条 active + 1 archived + 1 access > 0
+  for (let i = 0; i < 5; i++) {
+    upsertMemory(db, { kind: 'fact', scope: 'global', content: `dbstat ${i}`, importance: 0.7 })
+  }
+  const archived = upsertMemory(db, { kind: 'fact', scope: 'global', content: 'arch', importance: 0.7 })
+  db.prepare("UPDATE memories SET status='archived' WHERE id=?").run(archived.memory.id)
+  const top = upsertMemory(db, { kind: 'fact', scope: 'global', content: 'top访问', importance: 0.7 })
+  for (let i = 0; i < 5; i++) touchMemory(db, top.memory.id)
+
+  const s = getDashboardStats(db, { topLimit: 5, recentDays: 7 })
+  assert.ok(s.totals.active > 0)
+  assert.ok(s.totals.archived >= 1)
+  assert.ok(s.byKind.fact)
+  assert.ok(s.health.avgImportance > 0)
+  assert.ok(s.topAccessed.length >= 1)
+  assert.ok(s.topAccessed[0].access_count >= 1)
+  assert.ok(s.recent.length >= 1)
+  assert.ok(s.graph.edges !== undefined)
 })
 
 test.after(() => {
