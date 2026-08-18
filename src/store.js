@@ -621,3 +621,96 @@ export function decayStaleMemories(db, { staleDays = 90, maxBatch = 100, importa
 
   return { decayed: ids.length, scanned: stale.length, ids }
 }
+
+// ─── 合并相似记忆（consolidate）：让库保持"高效简洁" ──────────────────
+
+// 找 summary Jaccard > threshold 的对手对，合并为一条
+// 合并规则：保留更高的 (importance + access_count + recency)，
+//           把另一条的 content 拼到保留条的 content 末尾，归档另一条
+export function mergeSimilarMemories(db, { similarityThreshold = 0.5, maxBatch = 50 } = {}) {
+  // 一次拉所有 active、kind 相同、有 summary 的记忆（一次 SQL 拉所有，比循环拉 N 次快）
+  const rows = db.prepare(`
+    SELECT id, kind, summary, content, importance, access_count, last_accessed_at, created_at
+    FROM memories
+    WHERE status='active' AND summary != ''
+    ORDER BY kind, created_at
+  `).all()
+
+  const tokenCache = new Map()
+  const tokensOf = (s) => {
+    if (!tokenCache.has(s)) tokenCache.set(s, tokenizeCjk(s))
+    return tokenCache.get(s)
+  }
+
+  const score = (r) => {
+    const recency = r.last_accessed_at || r.created_at
+    return r.importance * 10 + r.access_count + (recency / 1e12)
+  }
+
+  const merged = new Set() // 已合并掉的 id
+  let mergeCount = 0
+  const errors = []
+
+  // 按 kind 分桶防止跨 kind 误合并
+  const byKind = new Map()
+  for (const r of rows) {
+    if (!byKind.has(r.kind)) byKind.set(r.kind, [])
+    byKind.get(r.kind).push(r)
+  }
+
+  for (const [, list] of byKind) {
+    if (mergeCount >= maxBatch) break
+    for (let i = 0; i < list.length; i++) {
+      if (merged.has(list[i].id)) continue
+      const a = list[i]
+      const aTokens = tokensOf(a.summary)
+      if (!aTokens.size) continue
+      for (let j = i + 1; j < list.length; j++) {
+        if (merged.has(list[j].id)) continue
+        const b = list[j]
+        const bTokens = tokensOf(b.summary)
+        if (!bTokens.size) continue
+        let inter = 0
+        for (const t of aTokens) if (bTokens.has(t)) inter++
+        const sim = inter / (aTokens.size + bTokens.size - inter)
+        if (sim < similarityThreshold) continue
+
+        // 决定保留哪一条
+        const aScore = score(a)
+        const bScore = score(b)
+        const keep = aScore >= bScore ? a : b
+        const drop = aScore >= bScore ? b : a
+
+        if (merged.has(keep.id)) break // keep 已被前面合并掉了，跳出 i 循环
+
+        // 拼接 content（去重已有内容）
+        const mergedContent = mergeContent(keep.content, drop.content)
+        try {
+          db.prepare(`
+            UPDATE memories SET content=?, updated_at=? WHERE id=?
+          `).run(mergedContent, Date.now(), keep.id)
+          // 归档另一条
+          db.prepare(`
+            UPDATE memories SET status='archived', updated_at=? WHERE id=?
+          `).run(Date.now(), drop.id)
+          merged.add(drop.id)
+          mergeCount++
+          if (mergeCount >= maxBatch) break
+        } catch (err) {
+          errors.push(`${drop.id}: ${err?.message ?? err}`)
+        }
+      }
+    }
+  }
+
+  return { merged: mergeCount, errors, scanned: rows.length }
+}
+
+function mergeContent(a, b) {
+  if (!a) return b || ''
+  if (!b) return a || ''
+  if (a.includes(b.slice(0, 100))) return a
+  if (b.includes(a.slice(0, 100))) return b
+  // 简单拼接 + 分隔
+  return `${a}\n\n---\n\n${b}`
+}

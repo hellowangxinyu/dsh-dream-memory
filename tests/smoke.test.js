@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { openDb } from '../src/db.js'
-import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary, decayStaleMemories } from '../src/store.js'
+import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary, decayStaleMemories, mergeSimilarMemories } from '../src/store.js'
 import { recall } from '../src/recall.js'
 import { importLegacy, parseLegacyEntry, importHermesWorkspace, parseMarkdownSections } from '../src/migrate.js'
 
@@ -248,6 +248,64 @@ test('decayStaleMemories：maxBatch 限制单次归档数', () => {
   }
   const r = decayStaleMemories(db, { staleDays: 90, maxBatch: 2 })
   assert.equal(r.decayed, 2, `应只归档 2 条，实际 ${r.decayed}`)
+})
+
+// ─── mergeSimilarMemories 让库保持高效简洁 ─────────────────────────────
+
+test('mergeSimilarMemories：Jaccard > 阈值的相似记忆合并', () => {
+  // 造 2 条非常相似的 fact
+  const a = upsertMemory(db, {
+    kind: 'fact', scope: 'global',
+    summary: '中文回复详细+技术说明先结构图示',
+    content: '中文回复要详细,技术说明先给结构图示再展开论据（A）',
+    importance: 0.7,
+  })
+  const b = upsertMemory(db, {
+    kind: 'fact', scope: 'global',
+    summary: '中文回复详细+技术说明先结构图示',
+    content: '中文回复要详细,技术说明先给结构图示再展开论据（B）',
+    importance: 0.7,
+  })
+  const r = mergeSimilarMemories(db, { similarityThreshold: 0.5, maxBatch: 50 })
+  assert.ok(r.merged >= 1, `应至少合并 1 对，实际 ${r.merged}`)
+  // 应该有一条被归档
+  const archived = db.prepare("SELECT id FROM memories WHERE status='archived' AND (id=? OR id=?)").all(a.memory.id, b.memory.id)
+  assert.ok(archived.length >= 1, '应至少一条被归档')
+})
+
+test('mergeSimilarMemories：Jaccard < 阈值不合并', () => {
+  // 造 2 条完全不同的
+  upsertMemory(db, {
+    kind: 'skill', scope: 'global',
+    summary: '侧边栏设置面板 async render',
+    content: 'DSH 插件侧边栏设置面板一直 loading 的修复方法',
+  })
+  upsertMemory(db, {
+    kind: 'skill', scope: 'global',
+    summary: 'PowerShell 单文件依赖追踪',
+    content: '用 PowerShell 追踪 .exe 依赖的 .dll',
+  })
+  const r = mergeSimilarMemories(db, { similarityThreshold: 0.5, maxBatch: 50 })
+  // 这 2 条 Jaccard 很低，0 合并是正常（不要求 0，但应没有 false merge）
+  // 看下实际
+  assert.ok(r.merged <= 0, `不应合并，实际合并 ${r.merged}`)
+})
+
+test('mergeSimilarMemories：跨 kind 不合并', () => {
+  // 两条 summary 几乎一样，但 kind 不同
+  upsertMemory(db, {
+    kind: 'fact', scope: 'global',
+    summary: '回复偏好详细中文+技术说明',
+    content: 'fact content',
+  })
+  upsertMemory(db, {
+    kind: 'preference', scope: 'global',
+    summary: '回复偏好详细中文+技术说明',
+    content: 'preference content',
+  })
+  const r = mergeSimilarMemories(db, { similarityThreshold: 0.5, maxBatch: 50 })
+  // 跨 kind 不能合并
+  assert.equal(r.merged, 0, `跨 kind 应不合并，实际 ${r.merged}`)
 })
 
 test.after(() => {

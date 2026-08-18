@@ -7,7 +7,7 @@
  *  - 输出严格 JSON，落库前做 schema/边方向校验
  */
 
-import { uid, normalizeName, upsertMemory, upsertLink, findByName, getMeta, setMeta, decayStaleMemories } from './store.js'
+import { uid, normalizeName, upsertMemory, upsertLink, findByName, getMeta, setMeta, decayStaleMemories, mergeSimilarMemories } from './store.js'
 import { getUnextracted, markExtracted, listMemories } from './store.js'
 import { computeGlobalPageRank, detectCommunities } from './graph.js'
 
@@ -58,12 +58,30 @@ const EXTRACT_SYS = `你是 dsh-dream-memory 的梦境整理引擎，从 AI Agen
    CONFLICTS_WITH: SKILL|FACT -> SKILL|FACT（互斥/矛盾）
    RELATED: 任意 -> 任意（跨主题/跨项目关联）
    边字段：{"from":"节点name","to":"节点name","type":"...","instruction":"具体可执行说明","condition":"可选触发条件"}
-4. 纪律（宁缺毋滥）：
-   - 禁止记录密钥、token、密码等敏感信息
-   - 禁止记录一次性寒暄、纯聊天、代码现状描述（代码会变）
-   - PREFERENCE 需要明确信号才记录；可疑的写 FACT 并把 importance 调低
-   - 没有知识产出就输出 {"nodes":[],"edges":[]}
-   - 每类节点最多 8 条，边最多 12 条，优先级：可复用 > 重要 > 新
+4. 纪律（严格闸门，宁缺毋滥）：
+   4a. 拒收清单（命中即丢）：
+       - 闲聊、客套、纯聊天（"好的"、"嗯"、"哈哈"）
+       - 重复已知信息（库中已有等价 name，不创建新节点）
+       - 临时状态（"今天有点累"、"现在正在 X"）
+       - 推测判断（"我觉得 X 应该是 Y"）
+       - 代码现状描述（代码会变，记了也白记）
+       - 一次性事件细节（"刚才那次报错"）
+       - 任何密钥/密码/token/PII 内容
+   4b. 决策门槛（满足任一才进库）：
+       - 用户明确说"记住"、"重要"、"以后"、"记下来"
+       - 用户多次重复确认同一信息
+       - 是用户稳定工作流的一部分
+       - 解决了真实问题或踩过真实坑
+       - 跨会话/跨项目可复用
+   4c. 密度上限：
+       - 每类节点最多 5 条（不是 8 条，因为闸门已经很严）
+       - 边最多 8 条
+       - 优先级：精确可复用 > 重要 > 新
+       - 重要性默认 0.7，PREFERENCE/DECISION 0.8，仅"关键决策" 0.9
+   4d. 自检：给出每个节点前，自问"
+       - 用户 90 天后还会需要这条吗？"
+       - "如果我没记这条，agent 多大概率会自动暴露这条信息？"
+       - 任何一个答案是'否'，跳过。
 5. 只返回 JSON。禁止 markdown 代码块、禁止解释。`;
 
 const EXTRACT_USER = (cards, existingNames, scopeHint) => `<Existing Nodes>
@@ -192,15 +210,31 @@ export async function runDream(db, cfg, scopeInfo, complete, log = () => {}) {
       const r = decayStaleMemories(db, { staleDays, maxBatch: 100 })
       decayed = r.decayed
       if (decayed > 0) {
-        log(`decay: archived ${decayed} stale memory (${staleDays}d+, importance<0.5, never accessed)`)
+        log(`decay: archived ${decayed} stale memory (${staleDays}d+, importance<0.7, never accessed)`)
       }
     } catch (err) {
       log(`decay failed: ${err?.message ?? err}`)
     }
   }
 
+  // 合并相似记忆：保持库"高效简洁"
+  // 0-token 0-LLM：纯 SQL + 简单 Jaccard 比较
+  // 默认关闭（避免误合并），用户可在 settings 开启
+  let merged = 0
+  if (cfg.mergeEnabled === true) {
+    try {
+      const r = mergeSimilarMemories(db, { similarityThreshold: 0.5, maxBatch: 50 })
+      merged = r.merged
+      if (merged > 0) {
+        log(`merge: collapsed ${merged} similar memory pairs`)
+      }
+    } catch (err) {
+      log(`merge failed: ${err?.message ?? err}`)
+    }
+  }
+
   log(`dream ran: ${rows.length} cards -> ${ops} ops (cursor=${maxSeq})`)
-  return { ran: true, cards: rows.length, ops, cursor: maxSeq, decayed }
+  return { ran: true, cards: rows.length, ops, cursor: maxSeq, decayed, merged }
 }
 
 /**
