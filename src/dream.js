@@ -45,6 +45,11 @@ const EXTRACT_SYS = `你是 dsh-dream-memory 的梦境整理引擎，从 AI Agen
 2. 节点字段（缺一不可）：
    { "type": "...", "name": "kebab-case 规范名，全小写，可含中文", "description": "一句话触发场景", "content": "按类型用纯文本模板写清楚，≤300字" }
    已有节点列表会给出，同一事物必须复用已有 name，不得创建重复节点。
+   description 必须是「可被中文 trigram FTS 命中」的具体词组合，禁止：
+   - 抽象标题（如「持久性优先」「中文优先」单独使用，无具体名词）
+   - 2 字以下的主题词（如「偏好」「习惯」会被判定为标签型记忆）
+   - 不出现在 content 中的关键词
+   自检：写完 description 后，用 description 做 query 能否召回本条 content？若不能，重写。
 3. 边类型（只允许这 6 个，且遵守方向）：
    USED_SKILL: TASK -> SKILL（任务用了某技能）
    SOLVED_BY: EVENT|SKILL|TASK -> SKILL（问题被某技能解决）
@@ -81,8 +86,9 @@ ${cards}
  */
 export async function runDream(db, cfg, scopeInfo, complete, log = () => {}) {
   if (cfg.dreamEnabled === false) return { ran: false, reason: 'disabled' }
-  const rows = getUnextracted(db, 50)
-  const min = Math.max(1, Number(cfg.minDreamMessages ?? 3))
+  const maxCards = Math.max(1, Math.min(50, Number(cfg.dreamMaxCards ?? 20)))
+  const rows = getUnextracted(db, maxCards)
+  const min = Math.max(1, Number(cfg.minDreamMessages ?? 10))
   if (rows.length < min) return { ran: false, reason: 'not-enough-events' }
 
   const cards = rows.map((m) => {
@@ -104,7 +110,9 @@ export async function runDream(db, cfg, scopeInfo, complete, log = () => {}) {
   const nameToId = new Map()
   let ops = 0
 
-  for (const node of parsed.nodes) {
+  db.exec('BEGIN')
+  try {
+    for (const node of parsed.nodes) {
     const kind = node.type.toLowerCase()
     const name = normalizeName(node.name)
     const scope = scopeInfo.projectId ? `project:${scopeInfo.projectId}` : 'global'
@@ -137,7 +145,7 @@ export async function runDream(db, cfg, scopeInfo, complete, log = () => {}) {
     const toName = normalizeName(edge.to)
     if (!fromName || !toName) continue
     const scope = scopeInfo.projectId ? `project:${scopeInfo.projectId}` : 'global'
-      const fromType = parsed.nameToType.get(fromName) ?? findByName(db, fromName, { scope })?.kind?.toUpperCase()
+    const fromType = parsed.nameToType.get(fromName) ?? findByName(db, fromName, { scope })?.kind?.toUpperCase()
     const toType = parsed.nameToType.get(toName) ?? findByName(db, toName, { scope })?.kind?.toUpperCase()
     if (fromType && toType && !edgeAllowed(edge.type, fromType, toType)) continue
     const fromId = nameToId.get(fromName) ?? findByName(db, fromName, { scope })?.id
@@ -157,7 +165,13 @@ export async function runDream(db, cfg, scopeInfo, complete, log = () => {}) {
   db.prepare('INSERT INTO dreams (id, session_id, cursor_seq, input_cards, ops, tokens, at) VALUES (?,?,?,?,?,?,?)')
     .run(uid('d'), scopeInfo.sessionId ?? null, maxSeq, rows.length, ops, Math.ceil(raw.length / 3), now)
 
-  // 图维护：每 3 次梦境重算一次 PageRank + 社区
+  db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+
+  // 图维护（自管事务，放在落库事务之外）：每 3 次梦境重算一次 PageRank + 社区
   const dreamCount = Number(db.prepare('SELECT COUNT(*) AS n FROM dreams').get().n ?? 0)
   if (dreamCount % 3 === 0) {
     try {
