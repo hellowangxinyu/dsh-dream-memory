@@ -35,6 +35,8 @@
 | **Auto merge** — pairs of memories with summary Jaccard > 0.5 → collapsed into one (0-LLM, pure SQL) | **自动合并** — summary Jaccard > 0.5 的相似记忆对合并为一条（0-LLM 纯 SQL）|
 | **Access boost** — every access +0.05 importance (cap 0.95), 1-min debounce to prevent burst inflation | **访问提权** — 每次访问 +0.05 importance（cap 0.95），1 分钟防抖防止高频抖动 |
 | **Recall SLA** — hard test guarantees recall < 500ms with 100+ entries | **召回 SLA** — 硬测试保证 100+ 条记忆下 recall < 500ms |
+| **3-tier memory model** — identity (1825d) / knowledge (90d) / working (14d) with per-tier decay + per-tier injection budget | **3 层记忆模型** — identity（1825 天）/ knowledge（90 天）/ working（14 天），分层衰减 + 分层注入预算 |
+| **Cross-tier injection** — identity always injected (identity card), knowledge on demand, working only if score ≥ 0.5 | **跨层注入** — identity 始终注入（身份卡），knowledge 按需，working 仅 score ≥ 0.5 注入 |
 | Cross-session, cross-project, cross-time | 跨会话、跨项目、跨时间 |
 | SQLite + FTS5 trigram for reliable Chinese retrieval | SQLite + FTS5 trigram 中文检索可靠 |
 | Optional knowledge graph (PageRank + community detection) | 可选知识图谱（PageRank + 社区检测）|
@@ -94,7 +96,9 @@ A **Memory** section appears under **Settings → General Settings**, with **liv
 | Identity card chars | 身份卡字符上限 | `750` | 200-3000 |
 | Recall block chars | 召回块字符上限 | `1500` | 300-6000 |
 | **Auto decay** | **自动归档** | `true` | boolean |
-| **Decay threshold (days)** | **归档阈值（天）** | `90` | 7-365 |
+| **Decay identity days** | **身份层归档阈值（天）** | `1825` | 30-3650 |
+| **Decay knowledge days** | **知识层归档阈值（天）** | `90` | 7-365 |
+| **Decay working days** | **工作记忆归档阈值（天）** | `14` | 1-90 |
 | **Auto merge** | **合并相似记忆** | `false` | boolean |
 
 ---
@@ -110,6 +114,64 @@ A **Memory** section appears under **Settings → General Settings**, with **liv
 | `dm_dream` | Run dream consolidation immediately | 立即运行一次梦境整理 |
 | `dm_consolidate` | Audit + archive label-only / vague summaries (no LLM) | 审计 + 归档标签型/模糊摘要（不调 LLM）|
 | `dm_stats_extended` | Cross-session dashboard: volume, health, top access, recent activity | 跨会话仪表盘：体量、健康度、Top 访问、最近活动 |
+
+---
+
+## Memory Tiers / 记忆分层
+
+All memories are classified into 3 tiers. Dream decides the tier on extraction; recall injects per-tier budgets; decay applies per-tier thresholds.
+
+所有记忆分 3 层。dream 在抽取时决定 tier；recall 按 tier 分预算；decay 按 tier 分阈值。
+
+| Tier | English | 中文 | Examples / 例子 | Decay / 衰减 |
+|---|---|---|---|---|
+| `identity` | User profile / identity | 用户身份/画像 | name, location, role, persistent preferences, vehicles, stable identity | 1825 days (5y) / 1825 天 |
+| `knowledge` | Long-term knowledge | 长期知识 | reusable skills, decisions, principles, lessons, stable facts | 90 days / 90 天 |
+| `working` | Working memory | 短期/会话上下文 | current tasks, recent events, session-specific notes | 14 days / 14 天 |
+
+### Classification rule / 分类规则
+
+> When in doubt, ask: **"Will I still need this 90 days later?"**
+>
+> 犹豫时问自己：**"90 天后还会用到吗？"**
+>
+> Yes → `identity` or `knowledge` · No → `working`
+> 是 → identity 或 knowledge · 否 → working
+
+### Tier lifecycle / 完整生命周期
+
+```
+[conversation happens]
+       ↓
+[dream extracts memory, LLM assigns tier]
+       ↓
+[write to memories table with tier column]
+       ↓
+[recall]:
+  - identity tier → ALWAYS inject via identity card (hard budget 750 chars)
+  - knowledge tier → inject into recall block (default 1500 chars)
+  - working tier → inject only if relevance score ≥ 0.5
+       ↓
+[decay] per tier:
+  - identity: 1825 days + importance ≥ 0.85
+  - knowledge: 90 days + importance < 0.7
+  - working: 14 days + importance < 0.7
+```
+
+```
+[对话发生]
+       ↓
+[dream 抽取，LLM 决定 tier]
+       ↓
+[写库（带 tier 列）]
+       ↓
+[召回]：
+  - identity → 强制走身份卡注入（750 字符硬预算）
+  - knowledge → 召回块注入（默认 1500 字符）
+  - working → 仅相关性 ≥ 0.5 才注入
+       ↓
+[衰减] 按 tier 分阈值
+```
 
 ---
 
@@ -138,14 +200,25 @@ Enabled by default. Runs at the end of every dream (every ~20h). Pure SQL, 0 tok
 
 默认开启。每次梦境跑完时执行（~20h 一次）。纯 SQL，0 token。
 
-Rule  /  规则：
+**Per-tier thresholds** — each tier has its own decay window:
+
+**分层阈值** — 每层有独立的衰减窗口：
+
+| Tier | Days | Importance gate |
+|---|---|---|
+| `identity` | 1825 (5y) | < 0.85 |
+| `knowledge` | 90 | < 0.7 |
+| `working` | 14 | < 0.7 |
+
+Rule per tier  /  每层规则：
 
 ```sql
 status='active'
-  AND importance < 0.7
+  AND tier = ?                  -- identity / knowledge / working
+  AND importance < ?             -- 0.85 / 0.7 / 0.7
   AND validated_count <= 1
   AND last_accessed_at IS NULL
-  AND created_at < (now - {decayStaleDays} days)
+  AND created_at < (now - ? days) -- 1825 / 90 / 14
 ```
 
 ### 3. Auto merge / 自动合并
