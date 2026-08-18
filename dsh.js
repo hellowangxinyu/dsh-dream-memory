@@ -584,7 +584,7 @@ export function apply(ctx, input = {}) {
         req.on('end', () => { try { resolve(JSON.parse(data)) } catch { resolve(null) } })
       })
       // 用 exact 路由（核心 webServer 已注册 /api 前缀，prefix 会被它抢先匹配导致 404）
-      const disposers = ['/api/dsh-dream-memory/settings', '/api/dsh-dream-memory/status'].map((path) =>
+      const disposers = ['/api/dsh-dream-memory/settings', '/api/dsh-dream-memory/status', '/api/dsh-dream-memory/memories', '/api/dsh-dream-memory/read'].map((path) =>
         ctx.webServer.register({
           kind: 'exact',
           path,
@@ -605,7 +605,32 @@ export function apply(ctx, input = {}) {
               const stats = getStats(db)
               return writeJson(res, 200, { ok: true, ...stats, dbPath: _dbPath })
             }
-            return writeJson(res, 404, { ok: false, error: `unknown route: ${req.method} ${sub}` })
+            if (sub === '/memories' && req.method === 'GET') {
+                const url = new URL(req.url ?? '/', 'http://localhost')
+                const rows = listMemories(db, {
+                  kind: url.searchParams.get('kind') || undefined,
+                  status: url.searchParams.get('status') || 'active',
+                  filter: url.searchParams.get('filter') || undefined,
+                  limit: Number(url.searchParams.get('limit') || 20),
+                })
+                return writeJson(res, 200, {
+                  ok: true,
+                  memories: rows.map((m) => ({
+                    id: m.id, kind: m.kind, scope: m.scope, summary: m.summary,
+                    importance: m.importance, created_at: m.created_at,
+                  })),
+                })
+              }
+              if (sub === '/read' && req.method === 'GET') {
+                const url = new URL(req.url ?? '/', 'http://localhost')
+                const id = url.searchParams.get('id')
+                if (!id) return writeJson(res, 400, { ok: false, error: 'id required' })
+                const memory = getMemory(db, id)
+                if (!memory) return writeJson(res, 404, { ok: false, error: 'not found' })
+                const evidence = db.prepare('SELECT * FROM evidence WHERE memory_id=?').all(id)
+                return writeJson(res, 200, { ok: true, memory, evidence })
+              }
+              return writeJson(res, 404, { ok: false, error: `unknown route: ${req.method} ${sub}` })
           } catch (err) {
             return writeJson(res, 500, { ok: false, error: err?.message ?? String(err) })
           }

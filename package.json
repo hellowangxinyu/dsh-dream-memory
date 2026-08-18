@@ -6,7 +6,7 @@
   "main": "dsh.js",
   "exports": {
     ".": "./dsh.js",
-    "./client": "./lib/client.js",
+    "./client": "./lib/settings-client.js",
       "./package.json": "./package.json"
   },
   "files": [

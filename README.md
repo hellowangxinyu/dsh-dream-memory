@@ -48,10 +48,11 @@ dsh plugin --profile web remove dsh-dream-memory
 
 ## Settings Panel / 设置面板
 
-After installation, a **Memory** entry appears in the sidebar. It shows:
+After installation, a **Memory** section appears under **Settings → General Settings**. It shows:
 
 - Live stats: memory entries, graph edges, raw events, FTS engine
 - Nine personalizable options: recall toggle, dream toggle, legacy import, recall count, graph depth, dream interval, minimum dream messages, identity-card budget, recall-block budget
+- A browsable list of memory entries; click any row to read the full content
 
 Changes are saved to `settings.json` and take effect immediately — no restart needed.
 
@@ -168,7 +169,7 @@ Markdown is a human-readable view; SQLite is the single source of truth.
 
 ```
 dsh.js                     Cordis host adapter (hooks + tools + web API)
-lib/client.js              Web UI: sidebar entry + settings panel
+lib/settings-client.js         Web UI: settings.section (general settings) + memory browser
 src/db.js                  SQLite schema + FTS5 triggers + migrations
 src/store.js               upsert/dedup/search/graph/events/vectors
 src/recall.js              hybrid recall + scoring
