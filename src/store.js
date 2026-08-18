@@ -458,6 +458,24 @@ export function markExtracted(db, upToSeq) {
   db.prepare('UPDATE messages SET extracted=1 WHERE seq<=?').run(Number(upToSeq))
 }
 
+// 删除已被 dream 抽取的旧消息（默认 30 天）
+// 关键原则：extracted=0 的永远不删（dream 还需要它们）
+// 只删 extracted=1 且超过 retention 天的，避免无限增长撑爆磁盘
+// SQLite 不支持 DELETE LIMIT，用子查询先取 id 再删
+export function cleanupExtractedMessages(db, { retentionDays = 30, maxBatch = 5000 } = {}) {
+  const cutoff = Date.now() - retentionDays * 86400 * 1000
+  const ids = db.prepare(`
+    SELECT id FROM messages
+    WHERE extracted = 1 AND created_at < ?
+    ORDER BY created_at ASC
+    LIMIT ?
+  `).all(cutoff, maxBatch).map((r) => r.id)
+  if (ids.length === 0) return { deleted: 0 }
+  const placeholders = ids.map(() => '?').join(',')
+  const r = db.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...ids)
+  return { deleted: Number(r.changes ?? 0) }
+}
+
 export function latestMessageSeq(db) {
   const row = db.prepare('SELECT MAX(seq) AS seq FROM messages').get()
   return Number(row?.seq ?? 0)

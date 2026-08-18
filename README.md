@@ -99,6 +99,7 @@ A **Memory** section appears under **Settings → General Settings**, with **liv
 | **Decay identity days** | **身份层归档阈值（天）** | `1825` | 30-3650 |
 | **Decay knowledge days** | **知识层归档阈值（天）** | `90` | 7-365 |
 | **Decay working days** | **工作记忆归档阈值（天）** | `14` | 1-90 |
+| **Messages retention (days)** | **消息保留（天）** | `30` | 0-365 |
 | **Auto merge** | **合并相似记忆** | `false` | boolean |
 
 ---
@@ -249,6 +250,25 @@ Default 0.6 → 0.65 → 0.70 → ... → 0.95 (7 accesses to saturate).
 This is the **dual of decay**: accessed memories grow in importance, ignored ones decay.
 
 这是 decay 的**对偶**：被用的记忆涨权重，没被用的衰减。
+
+### 5. Messages retention / 消息保留
+
+`messages` table stores raw conversation events for dream to extract. After extraction (`extracted=1`), the raw message is no longer needed and is purged after N days to bound disk growth.
+
+`messages` 表存的是原始对话事件，供 dream 抽取。抽取后 (`extracted=1`) 原始消息不再需要，N 天后自动清理以避免磁盘无限增长。
+
+| Setting | English | 中文 | Default |
+|---|---|---|---|
+| `messagesRetentionDays=30` | Delete `extracted=1` messages older than 30 days | 删除 30 天前已抽取的消息 | `30` |
+| `messagesRetentionDays=0` | Disable cleanup | 关闭清理 | — |
+
+**Safety guarantee**: `extracted=0` messages are NEVER deleted — dream still needs them for extraction. Only already-extracted messages are eligible.
+
+**安全保证**：`extracted=0` 永远不删——dream 还要靠它们抽取。只有已抽取的才被清理。
+
+Pure SQL, 0 tokens, runs at the end of every dream.
+
+纯 SQL，0 token，每次 dream 末尾执行。
 
 ---
 

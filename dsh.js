@@ -11,7 +11,7 @@
  *   4. 跨时间（时间戳）、跨会话（source_refs）、跨项目（scope + RELATED 边）
  */
 
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { openDb, getMeta, setMeta } from './src/db.js'
 import {
@@ -33,6 +33,21 @@ const HOST = 'dsh'
 
 function sessionKey(id) {
   return `${HOST}:${String(id)}`
+}
+
+// identity tier 内容指纹：1 SQL + 1 hash
+// 任何 active identity memory 的 id/updated_at/importance/summary 变化 → 重建身份卡
+// 不依赖 projectId:branch 这种外部键（之前漏检 case）
+function computeIdentityFingerprint(db, meta) {
+  const rows = db.prepare(`
+    SELECT id, importance, summary, updated_at
+    FROM memories
+    WHERE tier='identity' AND status='active'
+    ORDER BY id
+  `).all()
+  const payload = (meta?.projectId ?? '') + '|' + (meta?.branch ?? '') + '|' +
+    rows.map((r) => `${r.id}:${r.importance}:${r.updated_at}:${r.summary}`).join('|')
+  return createHash('sha1').update(payload).digest('hex').slice(0, 16)
 }
 
 function textBlocks(content) {
@@ -380,10 +395,13 @@ export function apply(ctx, input = {}) {
     try {
       const meta = scopeInfoOf(key)
 
-      // 身份卡：每个会话只构建一次（内容变化下次会话生效，保护前缀缓存）
+      // 身份卡：内容变化则重建（基于 active identity tier 的内容指纹）
+      // 之前的 fingerprint 只看 projectId:branch，新增/修改 identity tier 不会重建 → 看到陈旧身份卡
+      // 现在的 fingerprint = projectId:branch:identity content hash，1 条 SQL + 1 次内存比较
       let identity = identityCache.get(key)
-      if (!identity) {
-        identity = { fingerprint: `${meta.projectId ?? ''}:${meta.branch ?? ''}`, text: buildIdentityCard(db, meta, cfg) }
+      const liveFingerprint = computeIdentityFingerprint(db, meta)
+      if (!identity || identity.fingerprint !== liveFingerprint) {
+        identity = { fingerprint: liveFingerprint, text: buildIdentityCard(db, meta, cfg) }
         identityCache.set(key, identity)
       }
 

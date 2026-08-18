@@ -7,7 +7,7 @@
  *  - 输出严格 JSON，落库前做 schema/边方向校验
  */
 
-import { uid, normalizeName, upsertMemory, upsertLink, findByName, getMeta, setMeta, decayStaleMemories, mergeSimilarMemories } from './store.js'
+import { uid, normalizeName, upsertMemory, upsertLink, findByName, getMeta, setMeta, decayStaleMemories, mergeSimilarMemories, cleanupExtractedMessages } from './store.js'
 import { getUnextracted, markExtracted, listMemories } from './store.js'
 import { computeGlobalPageRank, detectCommunities } from './graph.js'
 
@@ -259,8 +259,24 @@ export async function runDream(db, cfg, scopeInfo, complete, log = () => {}) {
     }
   }
 
+  // 清理已被 dream 抽取的旧消息（0-token 0-LLM 纯 SQL DELETE）
+  // 只删 extracted=1 且超过 retentionDays 的；extracted=0 永远不删（dream 还要用）
+  let messagesDeleted = 0
+  if (cfg.messagesRetentionDays !== 0) {
+    try {
+      const retentionDays = Math.max(1, Number(cfg.messagesRetentionDays ?? 30))
+      const r = cleanupExtractedMessages(db, { retentionDays, maxBatch: 5000 })
+      messagesDeleted = r.deleted
+      if (messagesDeleted > 0) {
+        log(`messages cleanup: deleted ${messagesDeleted} extracted messages (${retentionDays}d+)`)
+      }
+    } catch (err) {
+      log(`messages cleanup failed: ${err?.message ?? err}`)
+    }
+  }
+
   log(`dream ran: ${rows.length} cards -> ${ops} ops (cursor=${maxSeq})`)
-  return { ran: true, cards: rows.length, ops, cursor: maxSeq, decayed, merged }
+  return { ran: true, cards: rows.length, ops, cursor: maxSeq, decayed, merged, messagesDeleted }
 }
 
 /**

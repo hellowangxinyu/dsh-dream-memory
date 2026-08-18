@@ -28,6 +28,7 @@ export const SETTING_FIELDS = {
   decayKnowledgeDays: { type: 'number', label: '知识层归档阈值（天）', hint: 'knowledge tier（长期事实/技能/决策）多少天未访问后归档', default: 90, min: 7, max: 365, step: 7 },
   decayWorkingDays: { type: 'number', label: '工作记忆归档阈值（天）', hint: 'working tier（当前任务/会话上下文）多少天未访问后归档', default: 14, min: 1, max: 90, step: 1 },
   mergeEnabled: { type: 'boolean', label: '合并相似记忆', hint: 'dream 跑完后顺手合并 summary Jaccard>0.5 的相似记忆对（0-LLM 纯 SQL）', default: false },
+  messagesRetentionDays: { type: 'number', label: '消息保留（天）', hint: 'dream 抽取后超过 N 天的消息自动删除（仅清 extracted=1；extracted=0 永远保留）。设 0 关闭', default: 30, min: 0, max: 365, step: 1 },
   identityMaxChars: { type: 'number', label: '身份卡字符上限', hint: '会话开头注入的 profile+key 总字符数', default: 750, min: 200, max: 3000, step: 50 },
   recallMaxChars: { type: 'number', label: '召回块字符上限', hint: '每次注入的召回内容总字符数', default: 1500, min: 300, max: 6000, step: 100 },
 }
