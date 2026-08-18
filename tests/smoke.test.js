@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { openDb } from '../src/db.js'
-import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary } from '../src/store.js'
+import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary, decayStaleMemories } from '../src/store.js'
 import { recall } from '../src/recall.js'
 import { importLegacy, parseLegacyEntry, importHermesWorkspace, parseMarkdownSections } from '../src/migrate.js'
 
@@ -173,6 +173,81 @@ test('updateMemorySummary：拒绝空字符串', () => {
   const a = upsertMemory(db, { kind: 'fact', scope: 'global', content: '测试内容' })
   const r = updateMemorySummary(db, a.memory.id, '')
   assert.equal(r.ok, false)
+})
+
+// ─── decayStaleMemories 防止库膨胀 ──────────────────────────────────
+
+test('decayStaleMemories：90 天以上未访问且 importance<0.7 自动归档', () => {
+  // 制造 1 条 100 天前创建、未访问、importance 0.3 的记忆
+  const old = upsertMemory(db, {
+    kind: 'fact', scope: 'global',
+    content: '老记忆 100 天前',
+    importance: 0.3,
+  })
+  const old_ms = Date.now() - 100 * 86400 * 1000
+  db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(old_ms, old_ms, old.memory.id)
+
+  // 制造 1 条 importance 0.9（高价值，不该被归档）
+  const important = upsertMemory(db, {
+    kind: 'fact', scope: 'global',
+    content: '高价值记忆',
+    importance: 0.9,
+  })
+  db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(old_ms, old_ms, important.memory.id)
+
+  // 制造 1 条 30 天前（新鲜，不该被归档）
+  const fresh = upsertMemory(db, {
+    kind: 'fact', scope: 'global',
+    content: '新鲜记忆',
+    importance: 0.3,
+  })
+  const fresh_ms = Date.now() - 30 * 86400 * 1000
+  db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(fresh_ms, fresh_ms, fresh.memory.id)
+
+  const r = decayStaleMemories(db, { staleDays: 90, maxBatch: 100 })
+  assert.ok(r.decayed >= 1, `至少归档 1 条，实际 ${r.decayed}`)
+
+  // 验证：老记忆被归档
+  const oldAfter = db.prepare('SELECT status FROM memories WHERE id=?').get(old.memory.id)
+  assert.equal(oldAfter.status, 'archived')
+  // 验证：高价值记忆没被归档
+  const impAfter = db.prepare('SELECT status FROM memories WHERE id=?').get(important.memory.id)
+  assert.equal(impAfter.status, 'active')
+  // 验证：新鲜记忆没被归档
+  const freshAfter = db.prepare('SELECT status FROM memories WHERE id=?').get(fresh.memory.id)
+  assert.equal(freshAfter.status, 'active')
+})
+
+test('decayStaleMemories：被访问过的记忆不被归档', () => {
+  const m = upsertMemory(db, {
+    kind: 'fact', scope: 'global',
+    content: '曾被访问',
+    importance: 0.3,
+  })
+  // 强制 old + 标记访问
+  const old_ms = Date.now() - 100 * 86400 * 1000
+  db.prepare('UPDATE memories SET created_at=?, last_accessed_at=?, updated_at=? WHERE id=?').run(old_ms, old_ms, old_ms, m.memory.id)
+
+  const r = decayStaleMemories(db, { staleDays: 90, maxBatch: 100 })
+  const after = db.prepare('SELECT status FROM memories WHERE id=?').get(m.memory.id)
+  assert.equal(after.status, 'active')
+})
+
+test('decayStaleMemories：maxBatch 限制单次归档数', () => {
+  // 造 5 条满足条件的记忆
+  const ids = []
+  for (let i = 0; i < 5; i++) {
+    const m = upsertMemory(db, {
+      kind: 'fact', scope: 'global',
+      content: `stale-${i}`,
+      importance: 0.3,
+    })
+    const old_ms = Date.now() - 100 * 86400 * 1000
+    db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(old_ms, old_ms, m.memory.id)
+    ids.push(m.memory.id)
+  }
+  const r = decayStaleMemories(db, { staleDays: 90, maxBatch: 2 })
+  assert.equal(r.decayed, 2, `应只归档 2 条，实际 ${r.decayed}`)
 })
 
 test.after(() => {

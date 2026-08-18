@@ -7,7 +7,7 @@
  *  - 输出严格 JSON，落库前做 schema/边方向校验
  */
 
-import { uid, normalizeName, upsertMemory, upsertLink, findByName, getMeta, setMeta } from './store.js'
+import { uid, normalizeName, upsertMemory, upsertLink, findByName, getMeta, setMeta, decayStaleMemories } from './store.js'
 import { getUnextracted, markExtracted, listMemories } from './store.js'
 import { computeGlobalPageRank, detectCommunities } from './graph.js'
 
@@ -182,8 +182,25 @@ export async function runDream(db, cfg, scopeInfo, complete, log = () => {}) {
     }
   }
 
+  // 自动归档（decay）：筛选 — 不让库无限膨胀
+  // 0-token 0-LLM：纯 SQL 扫描 + UPDATE
+  // 默认开启（cfg.decayEnabled !== false），可在 settings 关闭
+  let decayed = 0
+  if (cfg.decayEnabled !== false) {
+    try {
+      const staleDays = Math.max(1, Number(cfg.decayStaleDays ?? 90))
+      const r = decayStaleMemories(db, { staleDays, maxBatch: 100 })
+      decayed = r.decayed
+      if (decayed > 0) {
+        log(`decay: archived ${decayed} stale memory (${staleDays}d+, importance<0.5, never accessed)`)
+      }
+    } catch (err) {
+      log(`decay failed: ${err?.message ?? err}`)
+    }
+  }
+
   log(`dream ran: ${rows.length} cards -> ${ops} ops (cursor=${maxSeq})`)
-  return { ran: true, cards: rows.length, ops, cursor: maxSeq }
+  return { ran: true, cards: rows.length, ops, cursor: maxSeq, decayed }
 }
 
 /**

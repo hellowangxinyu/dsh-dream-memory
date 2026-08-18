@@ -23,6 +23,8 @@ export const SETTING_FIELDS = {
   dreamMaxCards: { type: 'number', label: '梦境输入卡片上限', hint: '单次梦境最多处理多少条事件（每条截 500 字）', default: 20, min: 5, max: 50, step: 1 },
   dreamMaxTokens: { type: 'number', label: '梦境输出预算（token）', hint: '梦境 LLM 单次输出上限', default: 1024, min: 256, max: 4096, step: 128 },
   dreamReasoningEffort: { type: 'string', label: '梦境推理强度', hint: '梦境 LLM 的推理强度（low/medium/high/max）', default: 'low' },
+  decayEnabled: { type: 'boolean', label: '自动归档', hint: 'dream 跑完后顺手归档：创建 N 天且从未访问且 importance<0.5 的记忆', default: true },
+  decayStaleDays: { type: 'number', label: '归档阈值（天）', hint: '创建超过 N 天仍未被访问的记忆会被自动归档', default: 90, min: 7, max: 365, step: 7 },
   identityMaxChars: { type: 'number', label: '身份卡字符上限', hint: '会话开头注入的 profile+key 总字符数', default: 750, min: 200, max: 3000, step: 50 },
   recallMaxChars: { type: 'number', label: '召回块字符上限', hint: '每次注入的召回内容总字符数', default: 1500, min: 300, max: 6000, step: 100 },
 }

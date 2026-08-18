@@ -586,3 +586,38 @@ export function updateMemorySummary(db, id, newSummary) {
 
 // 暴露给 synchronize 也用
 export { tokenizeCjk, jaccardTokens, isCjkChar }
+
+// ─── 自动归档（decay）：让库不无限膨胀 ────────────────────────────────
+
+// 规则：创建 N 天 + 从未访问 + importance < 0.7 → 自动归档
+//  - 不动 validated_count > 1（被多次重复验证的）
+//  - 不动 importance >= 0.7（被认定为重要）
+//  - 不动 90 天内新记忆（给 agent 时间消化）
+// 含义：默认 0.6 importance 且从没被引用的记忆——这类恰好是数量膨胀的来源，
+//      90 天还没被任何场景召回，说明价值低。
+export function decayStaleMemories(db, { staleDays = 90, maxBatch = 100, importanceMax = 0.7 } = {}) {
+  const cutoff = Date.now() - staleDays * 86400 * 1000
+  const stale = db.prepare(`
+    SELECT id, kind, importance, validated_count, last_accessed_at,
+           (julianday('now') - julianday(created_at/1000, 'unixepoch')) AS age_days
+    FROM memories
+    WHERE status='active'
+      AND importance < ?
+      AND validated_count <= 1
+      AND last_accessed_at IS NULL
+      AND created_at < ?
+    ORDER BY created_at ASC
+    LIMIT ?
+  `).all(importanceMax, cutoff, maxBatch)
+
+  if (stale.length === 0) return { decayed: 0, scanned: 0 }
+
+  const ids = stale.map((r) => r.id)
+  const placeholders = ids.map(() => '?').join(',')
+  db.prepare(`
+    UPDATE memories SET status='archived', updated_at=?
+    WHERE id IN (${placeholders}) AND status='active'
+  `).run(Date.now(), ...ids)
+
+  return { decayed: ids.length, scanned: stale.length, ids }
+}
