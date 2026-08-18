@@ -17,8 +17,12 @@ export const SETTING_FIELDS = {
   legacyImport: { type: 'boolean', label: '旧格式导入', hint: '启动时导入 dsh-memory-evolve / Hermes 旧文件', default: true },
   recallMaxNodes: { type: 'number', label: '召回条数', hint: '每次注入的最大记忆条数（3-10）', default: 6, min: 3, max: 10, step: 1 },
   recallMaxDepth: { type: 'number', label: '图扩展深度', hint: '从命中节点沿知识图谱扩展几跳（0-3）', default: 1, min: 0, max: 3, step: 1 },
-  dreamInterval: { type: 'number', label: '梦境间隔（回合）', hint: '每 N 个回合自动触发一次梦境', default: 6, min: 3, max: 30, step: 1 },
-  minDreamMessages: { type: 'number', label: '梦境最小事件数', hint: '积攒多少条未处理事件才开始做梦', default: 3, min: 1, max: 20, step: 1 },
+  dreamInterval: { type: 'number', label: '梦境间隔（回合）', hint: '每 N 个回合自动触发一次梦境（与最小小时间隔共同生效）', default: 6, min: 3, max: 30, step: 1 },
+  minDreamMessages: { type: 'number', label: '梦境最小事件数', hint: '积攒多少条未处理事件才开始做梦', default: 10, min: 1, max: 50, step: 1 },
+  dreamMinIntervalHours: { type: 'number', label: '梦境最小间隔（小时）', hint: '距上次梦境不足 N 小时不触发，默认一天一次', default: 20, min: 1, max: 168, step: 1 },
+  dreamMaxCards: { type: 'number', label: '梦境输入卡片上限', hint: '单次梦境最多处理多少条事件（每条截 500 字）', default: 20, min: 5, max: 50, step: 1 },
+  dreamMaxTokens: { type: 'number', label: '梦境输出预算（token）', hint: '梦境 LLM 单次输出上限', default: 1024, min: 256, max: 4096, step: 128 },
+  dreamReasoningEffort: { type: 'string', label: '梦境推理强度', hint: '梦境 LLM 的推理强度（low/medium/high/max）', default: 'low' },
   identityMaxChars: { type: 'number', label: '身份卡字符上限', hint: '会话开头注入的 profile+key 总字符数', default: 750, min: 200, max: 3000, step: 50 },
   recallMaxChars: { type: 'number', label: '召回块字符上限', hint: '每次注入的召回内容总字符数', default: 1500, min: 300, max: 6000, step: 100 },
 }
@@ -33,6 +37,7 @@ function coerce(key, value) {
   const spec = SETTING_FIELDS[key]
   if (!spec) return undefined
   if (spec.type === 'boolean') return value === true || value === 'true' || value === 1
+  if (spec.type === 'string') return typeof value === 'string' ? value : spec.default
   if (spec.type === 'number') {
     const n = Number(value)
     if (!Number.isFinite(n)) return spec.default

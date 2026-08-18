@@ -13,7 +13,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { openDb, getMeta } from './src/db.js'
+import { openDb, getMeta, setMeta } from './src/db.js'
 import {
   upsertMemory, getMemory, listMemories, saveMessageOnce, getStats, setStatus, touchMemory,
   resolveProjectId, projectLabel, getUnextracted,
@@ -25,7 +25,7 @@ import { importLegacy, legacyDirDefault, importHermesWorkspace } from './src/mig
 import { loadSettings, saveSettings, settingsView, defaultDbPath } from './src/settings.js'
 
 export const name = 'dsh-dream-memory'
-export const inject = ['tools', 'systemPrompt', 'llm', 'sessions', 'credentials', 'webServer']
+export const inject = ['tools', 'systemPrompt', 'llm', 'sessions', 'webServer']
 
 const HOST = 'dsh'
 
@@ -147,6 +147,7 @@ export function apply(ctx, input = {}) {
   const recallCache = new Map()
   const extractChain = new Map()
   const turnCounts = new Map()
+  const activeSteps = new Map() // sessionKey -> 进行中的 step 数（主对话活跃检测）
   const sessionMeta = new Map() // sessionKey -> { cwd, projectId, label, branch }
   const identityCache = new Map() // sessionKey -> { fingerprint, text }
   const identityInjected = new Map() // sessionKey -> true（身份卡每会话只注入一次）
@@ -168,13 +169,14 @@ export function apply(ctx, input = {}) {
   function refreshMeta(id, cwd) {
     const meta = metaFor(id)
     if (!cwd) return meta
+    // 缓存：cwd 未变化时直接返回，绝不重复解析项目身份
+    // （resolveProjectId 内部会 spawn git，逐事件调用会把流式输出卡成逐段停顿）
+    if (meta.cwd === cwd) return meta
     const identity = resolveProjectId(cwd)
-    if (meta.cwd !== cwd) {
-      meta.cwd = cwd
-      meta.projectId = identity.id
-      meta.label = projectLabel(cwd) ?? identity.displayName
-      meta.branch = gitBranch(cwd)
-    }
+    meta.cwd = cwd
+    meta.projectId = identity.id
+    meta.label = projectLabel(cwd) ?? identity.displayName
+    meta.branch = gitBranch(cwd)
     return meta
   }
 
@@ -193,9 +195,10 @@ export function apply(ctx, input = {}) {
     const chunks = ctx.llm.stream({
       provider: selected.provider,
       model: selected.model,
+      reasoningEffort: cfg.dreamReasoningEffort ?? 'low',
       system,
       temperature: 0.1,
-      maxTokens: input.llmMaxTokens ?? 4096,
+      maxTokens: cfg.dreamMaxTokens ?? 1024,
       messages: [{
         id: randomUUID(),
         role: 'user',
@@ -258,17 +261,24 @@ export function apply(ctx, input = {}) {
 
     if (!Array.isArray(agent?.session?.events)) return
     for (const event of agent.session.events) ingest(id, event)
-      maybeScheduleDream(id)
+  }
 
-    function maybeScheduleDream(sessionId) {
-      if (cfg.dreamEnabled === false || closing) return
-      const key = String(sessionId)
-      if (dreamQueued.has(key)) return
-      if (getUnextracted(db, 50).length >= Math.max(1, Number(cfg.minDreamMessages ?? 3))) {
-        scheduleDream(key)
-      }
-    }
+  // 梦境门控：积压 >= minDreamMessages 且 距上次梦境 >= dreamMinIntervalHours（默认一天一次）
+  // 且 没有进行中的主对话 step。三者全过才调度，否则保持静默。
+  function maybeScheduleDream(sessionId) {
+    if (cfg.dreamEnabled === false || closing) return
+    const key = String(sessionId)
+    if (dreamQueued.has(key)) return
 
+    const minMsgs = Math.max(1, Number(cfg.minDreamMessages ?? 10))
+    if (getUnextracted(db, 50).length < minMsgs) return
+
+    const minIntervalMs = Math.max(0, Number(cfg.dreamMinIntervalHours ?? 20)) * 3600000
+    const lastDreamAt = getMeta(db, 'last_dream_at')
+    if (lastDreamAt !== null && Date.now() - Number(lastDreamAt) < minIntervalMs) return
+
+    if (activeSteps.size > 0) return
+    scheduleDream(key)
   }
 
   function scheduleDream(sessionId) {
@@ -279,13 +289,14 @@ export function apply(ctx, input = {}) {
       const previous = extractChain.get(key) ?? Promise.resolve()
     const next = previous.then(async () => {
       const meta = scopeInfoOf(key)
-      await runDream(db, cfg, {
+      const result = await runDream(db, cfg, {
         sessionId: sessionKey(key),
         projectId: meta.projectId,
         label: meta.label,
         branch: meta.branch,
       }, (system, user) => complete(latestRoute.get(key), system, user),
         (msg) => ctx.logger?.info(`[dsh-dream-memory] ${msg}`))
+      if (result.ran) setMeta(db, 'last_dream_at', String(Date.now()))
     }).catch((err) => {
       ctx.logger?.warn(`[dsh-dream-memory] dream deferred: ${err?.message ?? err}`)
     })
@@ -298,7 +309,13 @@ export function apply(ctx, input = {}) {
 
   // ── 可选 embedding（OpenAI 兼容接口） ──
   let embedFn = null
-  const embCfg = input.embedding
+  const embCfg = input.embedding ?? {
+      apiKeyEnv: process.env.DREAM_MEMORY_EMBEDDING_API_KEY ? 'DREAM_MEMORY_EMBEDDING_API_KEY' : undefined,
+      baseURL: process.env.DREAM_MEMORY_EMBEDDING_BASE_URL,
+      baseUrl: undefined,
+      model: process.env.DREAM_MEMORY_EMBEDDING_MODEL,
+      dimensions: process.env.DREAM_MEMORY_EMBEDDING_DIMENSIONS ? Number(process.env.DREAM_MEMORY_EMBEDDING_DIMENSIONS) : undefined,
+    }
   const embApiKeyEnv = embCfg?.apiKeyEnv
   if (embCfg?.baseURL || embCfg?.baseUrl || embApiKeyEnv) {
     embedFn = async (text) => {
@@ -327,12 +344,18 @@ export function apply(ctx, input = {}) {
     if (id === undefined) return
     refreshMeta(id, session?.header?.cwd ?? session?.cwd)
     ingest(id, event)
-    if (event?.type === 'turn/end') {
-      const key = String(id)
+    const key = String(id)
+    if (event?.type === 'step/start') {
+      // 主对话活跃跟踪：有任何进行中的 step 就不做梦境（避免抢 LLM 并发）
+      activeSteps.set(key, (activeSteps.get(key) ?? 0) + 1)
+    } else if (event?.type === 'step/end') {
+      const c = (activeSteps.get(key) ?? 1) - 1
+      if (c <= 0) activeSteps.delete(key)
+      else activeSteps.set(key, c)
+    } else if (event?.type === 'turn/end') {
       const turns = (turnCounts.get(key) ?? 0) + 1
       turnCounts.set(key, turns)
-      if (turns % cfg.dreamInterval === 0) scheduleDream(key)
-        if (getUnextracted(db, 50).length >= 50) scheduleDream(key)
+      maybeScheduleDream(key)
     }
   })
 
@@ -560,10 +583,12 @@ export function apply(ctx, input = {}) {
         req.on('data', (c) => { data += c; if (data.length > 100_000) req.destroy() })
         req.on('end', () => { try { resolve(JSON.parse(data)) } catch { resolve(null) } })
       })
-      const dispose = ctx.webServer.register({
-        kind: 'prefix',
-        path: '/api/dsh-dream-memory',
-        handler: async (req, res) => {
+      // 用 exact 路由（核心 webServer 已注册 /api 前缀，prefix 会被它抢先匹配导致 404）
+      const disposers = ['/api/dsh-dream-memory/settings', '/api/dsh-dream-memory/status'].map((path) =>
+        ctx.webServer.register({
+          kind: 'exact',
+          path,
+          handler: async (req, res) => {
           if (!isLoopback(req)) return writeJson(res, 403, { ok: false, error: 'forbidden: loopback-only' })
           const sub = req.url?.split('?')[0]?.replace('/api/dsh-dream-memory', '') || '/'
           try {
@@ -585,8 +610,9 @@ export function apply(ctx, input = {}) {
             return writeJson(res, 500, { ok: false, error: err?.message ?? String(err) })
           }
         },
-      })
-      return () => dispose()
+        })
+      )
+      return () => disposers.forEach((dispose) => dispose())
     }, 'dsh-dream-memory: web api')
 
   ctx.effect(() => async () => {
