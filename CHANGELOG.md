@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] - 2026-08-18
+
+### Added / 新增
+- **Messages retention** / 消息保留
+  - `cleanupExtractedMessages(db, opts)` deletes `extracted=1` messages older than N days
+  - Wired into dream end (0 LLM, 0 token, pure SQL DELETE)
+  - New setting `messagesRetentionDays` (default 30, set 0 to disable)
+  - **Safety guarantee**: `extracted=0` messages are NEVER deleted (dream still needs them)
+- **Identity card content fingerprint** / 身份卡内容指纹
+  - Replaces fragile `projectId:branch` fingerprint with sha1(projectId + branch + identity rows hash)
+  - Any change to identity tier memories (insert/update/delete) invalidates the card within the same session
+  - 1 SQL query + 1 hash computation, ~0.5ms cost (only at session start, not in recall hot path)
+
+### Performance / 性能
+- No new performance impact on recall (fingerprint is cached per session)
+- Messages cleanup is debounced: only runs at end of dream (~every 20h)
+
+### Tests / 测试
+- 37 regression tests (was 34)
+- +3 cases: messages retention deletes 60d+ old, preserves <30d recent, identity fingerprint changes after new identity
+
+---
+
 ## [0.3.0] - 2026-08-18
 
 ### Added / 新增
@@ -156,7 +179,8 @@ dsh web
 
 ---
 
-[Unreleased]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hellowangxinyu/dsh-dream-memory/releases/tag/v0.1.0
