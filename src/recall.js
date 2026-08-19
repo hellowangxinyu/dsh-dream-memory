@@ -14,6 +14,7 @@ import {
   cosine,
   touchMemory,
   recordRecallPerf,
+  recordRecallReason,
 } from './store.js'
 import { personalizedPageRank } from './graph.js'
 
@@ -153,6 +154,8 @@ export async function recall(db, cfg, query, scopeInfo = {}, embedFn = null) {
 
   // 性能监控（方案 A）：0.5ms 开销，方便 debug 趋势
   recordRecallPerf(db, Date.now() - _t0)
+  // Recall reason 记录（debug "为什么召回到这些"）：0 token
+  recordRecallReason(db, query, selected.map((s) => s.memory.id))
 
   return {
     entries: selected.map((s) => s.memory),

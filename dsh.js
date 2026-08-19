@@ -18,7 +18,7 @@ import {
   upsertMemory, getMemory, listMemories, saveMessageOnce, getStats, setStatus, touchMemory,
   resolveProjectId, projectLabel, getUnextracted,
   analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary,
-  getDashboardStats, getRecallPerf,
+  getDashboardStats, getRecallPerf, findFossilMemories, getLastRecallReason,
 } from './src/store.js'
 import { recall, markAccessed } from './src/recall.js'
 import { buildIdentityCard, formatRecall, formatList } from './src/inject.js'
@@ -656,6 +656,15 @@ export function apply(ctx, input = {}) {
       const days = Math.max(1, Math.min(90, Number(args.recentDays ?? 7)))
       const s = getDashboardStats(db, { topLimit: top, recentDays: days })
       const p = getRecallPerf(db)
+      const lastRecall = getLastRecallReason(db)
+      const fossils = findFossilMemories(db, {
+        tierDays: {
+          identity: Number(cfg.decayIdentityDays ?? 1825),
+          knowledge: Number(cfg.decayKnowledgeDays ?? 90),
+          working: Number(cfg.decayWorkingDays ?? 14),
+        },
+        limit: 10,
+      })
       const lines = []
       lines.push(`=== 跨会话仪表盘 ===`)
       lines.push(`· 体量`)
@@ -669,6 +678,12 @@ export function apply(ctx, input = {}) {
       lines.push(`· Recall 性能 (${p.windowSize} 样本)`)
       lines.push(`  last=${p.last}ms avg=${p.avg}ms P50=${p.p50}ms P95=${p.p95}ms P99=${p.p99}ms`)
       lines.push(`  累计 ${p.count} 次`)
+      if (lastRecall.lastQuery) {
+        const ago = lastRecall.lastAt ? Math.round((Date.now() - lastRecall.lastAt) / 60000) : 0
+        lines.push(`· Recall 上次调用 (${ago} 分钟前)`)
+        lines.push(`  query: ${lastRecall.lastQuery.slice(0, 80)}`)
+        lines.push(`  命中: ${(lastRecall.lastIds || []).slice(0, 5).join(', ')}${(lastRecall.lastIds || []).length > 5 ? ' ...' : ''}`)
+      }
       lines.push(`· Top ${top} 访问频率`)
       for (const m of s.topAccessed) {
         lines.push(`  [${m.kind}|acc=${m.access_count}|imp=${m.importance.toFixed(2)}] ${m.summary?.slice(0, 40) ?? ''}`)
@@ -676,6 +691,14 @@ export function apply(ctx, input = {}) {
       lines.push(`· Top ${top} 重要性`)
       for (const m of s.topImportance) {
         lines.push(`  [${m.kind}|imp=${m.importance.toFixed(2)}|acc=${m.access_count}] ${m.summary?.slice(0, 40) ?? ''}`)
+      }
+      lines.push(`· 化石预警 (${fossils.length} 条即将被 decay)`)
+      if (fossils.length === 0) {
+        lines.push(`  无`)
+      } else {
+        for (const f of fossils.slice(0, 10)) {
+          lines.push(`  [${f.tier}|${f.decayInDays}d 后归档] [${f.kind}|imp=${Number(f.importance).toFixed(2)}] ${(f.summary ?? '').slice(0, 50)}`)
+        }
       }
       lines.push(`· 最近 ${days} 天新增`)
       for (const r of s.recent) {

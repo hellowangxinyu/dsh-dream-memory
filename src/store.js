@@ -845,6 +845,56 @@ export function getDashboardStats(db, { topLimit = 10, recentDays = 7 } = {}) {
   return { totals, byKind, health, topAccessed, topImportance, recent, graph, generatedAt: Date.now() }
 }
 
+// 化石记忆：active 但即将被 decay 归档（age >= tierDays * threshold）
+// 0 token 0 LLM 纯 SQL 扫描 — 防止"突然断电"式批量归档
+export function findFossilMemories(db, { tierDays = { identity: 1825, knowledge: 90, working: 14 }, threshold = 0.8, limit = 20 } = {}) {
+  const now = Date.now()
+  const rows = []
+  for (const [tier, days] of Object.entries(tierDays)) {
+    if (!days || days <= 0) continue
+    const minAgeDays = Math.floor(days * threshold)
+    const cutoff = now - minAgeDays * 86400 * 1000
+    const tierRows = db.prepare(`
+      SELECT id, kind, tier, importance, summary, created_at, last_accessed_at,
+        (julianday('now') - julianday(created_at/1000, 'unixepoch')) AS age_days
+      FROM memories
+      WHERE status='active'
+        AND tier = ?
+        AND last_accessed_at IS NULL
+        AND importance < 0.7
+        AND created_at < ?
+      ORDER BY importance ASC, created_at ASC
+      LIMIT ?
+    `).all(tier, cutoff, limit)
+    for (const r of tierRows) {
+      rows.push({
+        ...r,
+        decayInDays: Math.max(0, days - Math.floor(r.age_days)),
+        tierDays: days,
+      })
+    }
+  }
+  rows.sort((a, b) => a.decayInDays - b.decayInDays)
+  return rows.slice(0, limit)
+}
+
+// Recall 上次查询的原因（最近 1 次）：query + 命中的 ids + 时间
+export function getLastRecallReason(db) {
+  // 注意：返回的字段可能是空串/0/null，需要 caller 区分"未记录"和"记录但空"
+  const q = getMeta(db, 'recall.last_query')
+  const idsRaw = getMeta(db, 'recall.last_ids')
+  const atRaw = getMeta(db, 'recall.last_at')
+  return {
+    hasRecord: q !== null && q !== undefined,
+    lastQuery: q ?? null,
+    lastIds: (() => {
+      if (!idsRaw) return []
+      try { return JSON.parse(idsRaw) } catch { return [] }
+    })(),
+    lastAt: atRaw ? Number(atRaw) : null,
+  }
+}
+
 // ─── Recall 性能监控（方案 A） ──────────────────────────────────
 // 在每次 recall 调用完后写入 meta 表，0.5ms 开销。
 // 存储：last ms / 总样本数 / 总 ms 数 / p95 滚动窗口（最近 100 条）
@@ -869,6 +919,16 @@ export function recordRecallPerf(db, ms) {
     setMeta(db, 'recall.ms.sum', String(newSum))
     setMeta(db, 'recall.ms.window', JSON.stringify(window))
   } catch { /* 监控失败不影响主流程 */ }
+}
+
+// 记录最近一次 recall 的内容（query + 命中的 ids），用于 debug "为什么召回到这些"
+// 0 token 0 LLM 纯 meta UPSERT
+export function recordRecallReason(db, query, ids) {
+  try {
+    setMeta(db, 'recall.last_query', String(query ?? '').slice(0, 500))
+    setMeta(db, 'recall.last_ids', JSON.stringify((ids ?? []).slice(0, 30)))
+    setMeta(db, 'recall.last_at', String(Date.now()))
+  } catch { /* debug 字段失败不影响主流程 */ }
 }
 
 export function getRecallPerf(db) {

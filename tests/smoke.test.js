@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { openDb } from '../src/db.js'
-import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary, decayStaleMemories, mergeSimilarMemories, getDashboardStats, touchMemory, recordRecallPerf, getRecallPerf, listMemories, cleanupExtractedMessages } from '../src/store.js'
+import { upsertMemory, getMemory, searchMemories, upsertLink, graphWalk, saveMessageOnce, getUnextracted, markExtracted, getStats, analyzeMemoryQuality, archiveMemoryWithReason, updateMemorySummary, decayStaleMemories, mergeSimilarMemories, getDashboardStats, touchMemory, recordRecallPerf, getRecallPerf, listMemories, cleanupExtractedMessages, findFossilMemories, getLastRecallReason, recordRecallReason } from '../src/store.js'
 import { recall } from '../src/recall.js'
 import { importLegacy, parseLegacyEntry, importHermesWorkspace, parseMarkdownSections } from '../src/migrate.js'
 
@@ -416,6 +416,54 @@ test('computeIdentityFingerprint：内容变化指纹就变', async () => {
   upsertMemory(db, { kind: 'profile', scope: 'global', content: 'v2' })
   const fp2 = compute()
   assert.notEqual(fp1, fp2, '新增 identity 后指纹应变化')
+})
+
+// ─── 化石记忆（item 3）+ Recall reason 记录（item 2） ───────────────────
+
+test('findFossilMemories：列出即将被 decay 的 active 记忆', () => {
+  // 造 1 条 80 天前、importance 0.5、从未访问的知识记忆
+  const m = upsertMemory(db, { kind: 'fact', scope: 'global', content: '化石测试', importance: 0.5 })
+  const old_ms = Date.now() - 80 * 86400 * 1000
+  db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(old_ms, old_ms, m.memory.id)
+
+  // 1 条 50 天前的（未到 80% 阈值）
+  const fresh = upsertMemory(db, { kind: 'fact', scope: 'global', content: '近的', importance: 0.5 })
+  const mid_ms = Date.now() - 50 * 86400 * 1000
+  db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(mid_ms, mid_ms, fresh.memory.id)
+
+  // 默认 knowledge=90d, threshold=0.8 → 72d 起视为化石
+  const fossils = findFossilMemories(db, { tierDays: { knowledge: 90 }, threshold: 0.8 })
+  assert.ok(fossils.length >= 1, `应至少 1 条化石，实际 ${fossils.length}`)
+  assert.ok(fossils.some((f) => f.id === m.memory.id), '80 天前那条应在化石列表')
+  assert.ok(!fossils.some((f) => f.id === fresh.memory.id), '50 天前那条不应在')
+  // 化石应带 decayInDays 字段
+  assert.ok(fossils[0].decayInDays >= 0)
+})
+
+test('findFossilMemories：高 importance 不会被标记为化石', () => {
+  const m = upsertMemory(db, { kind: 'fact', scope: 'global', content: '高价值', importance: 0.9 })
+  const old_ms = Date.now() - 100 * 86400 * 1000
+  db.prepare('UPDATE memories SET created_at=?, updated_at=? WHERE id=?').run(old_ms, old_ms, m.memory.id)
+  const fossils = findFossilMemories(db, { tierDays: { knowledge: 90 } })
+  assert.ok(!fossils.some((f) => f.id === m.memory.id), 'importance 0.9 不应是化石')
+})
+
+test('recordRecallReason + getLastRecallReason：记录和读取', () => {
+  recordRecallReason(db, '测试 query', ['m-001', 'm-002', 'm-003'])
+  const r = getLastRecallReason(db)
+  assert.equal(r.lastQuery, '测试 query')
+  assert.deepEqual(r.lastIds, ['m-001', 'm-002', 'm-003'])
+  assert.ok(r.lastAt > 0, 'lastAt 应被设')
+  // 更新：被覆盖
+  recordRecallReason(db, '第二次 query', ['m-100'])
+  const r2 = getLastRecallReason(db)
+  assert.equal(r2.lastQuery, '第二次 query')
+  assert.deepEqual(r2.lastIds, ['m-100'])
+  // 边界：空 ids
+  recordRecallReason(db, '', [])
+  const r3 = getLastRecallReason(db)
+  assert.equal(r3.lastQuery, '')
+  assert.deepEqual(r3.lastIds, [])
 })
 
 // ─── mergeSimilarMemories 让库保持高效简洁 ─────────────────────────────
