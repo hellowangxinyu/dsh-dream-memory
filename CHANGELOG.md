@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.3] - 2026-08-18
+
+### Added / 新增
+- **Observable recall trajectory** / 可观察的召回轨迹
+  - Inspired by OpenViking's observable retrieval: each recall now records per-hit details (score, importance, tier, fromGraph, rank)
+  - dm_stats_extended shows per-hit debug lines
+  - Answers "why did recall return these?" at a glance
+  - `fromGraph=true` = hit reached via knowledge graph walk, not direct FTS5 lexical match
+  - 0 LLM 0 token (1 meta JSON UPSERT, < 0.5ms overhead)
+
+### Tests / 测试
+- 41 regression tests (was 40)
+- +1 case: full trajectory fields (score/tier/fromGraph/rank)
+
+---
+
 ## [0.3.2] - 2026-08-18
 
 ### Added / 新增
@@ -203,7 +219,8 @@ dsh web
 
 ---
 
-[Unreleased]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.2.0...v0.3.0
