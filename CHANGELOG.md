@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.2] - 2026-08-18
+
+### Added / 新增
+- **Fossil memory warning** / 化石记忆预警
+  - `findFossilMemories(db, opts)` lists active memories about to be decayed
+  - Trigger: `age >= tierDays * 0.8` AND `last_accessed_at IS NULL` AND `importance < 0.7`
+  - Prevents the "90-day cliff" — agent sees what will disappear before it does
+  - Surface in `dm_stats_extended` "化石预警" section
+- **Recall reason logging** / Recall 原因记录
+  - `recordRecallReason(db, query, ids)` stores latest query + hit ids in meta
+  - `getLastRecallReason(db)` returns them for debug
+  - Auto-called from `recall()` — 0 token, < 0.5ms overhead
+  - Surface in `dm_stats_extended` "Recall 上次调用" section
+
+### Fixed / 修复
+- `getLastRecallReason` previously used `|| null` which converted empty string to null
+  - Now uses `?? null` and adds `hasRecord` field to distinguish "never recorded" from "recorded as empty"
+
+### Tests / 测试
+- 40 regression tests (was 37)
+- +3 cases: fossil (80d listed, 50d not), fossil (high importance excluded), recall reason (write/read/overwrite/empty boundary)
+
+---
+
 ## [0.3.1] - 2026-08-18
 
 ### Added / 新增
@@ -179,7 +203,8 @@ dsh web
 
 ---
 
-[Unreleased]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hellowangxinyu/dsh-dream-memory/compare/v0.1.0...v0.2.0
