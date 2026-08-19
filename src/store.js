@@ -878,21 +878,49 @@ export function findFossilMemories(db, { tierDays = { identity: 1825, knowledge:
   return rows.slice(0, limit)
 }
 
-// Recall 上次查询的原因（最近 1 次）：query + 命中的 ids + 时间
+// Recall 上次查询的原因（最近 1 次）：query + 完整轨迹（每条命中的 score/tier/fromGraph）
 export function getLastRecallReason(db) {
   // 注意：返回的字段可能是空串/0/null，需要 caller 区分"未记录"和"记录但空"
   const q = getMeta(db, 'recall.last_query')
-  const idsRaw = getMeta(db, 'recall.last_ids')
+  const trajRaw = getMeta(db, 'recall.last_trajectory')
   const atRaw = getMeta(db, 'recall.last_at')
   return {
     hasRecord: q !== null && q !== undefined,
     lastQuery: q ?? null,
-    lastIds: (() => {
-      if (!idsRaw) return []
-      try { return JSON.parse(idsRaw) } catch { return [] }
+    lastTrajectory: (() => {
+      if (!trajRaw) return []
+      try { return JSON.parse(trajRaw) } catch { return [] }
     })(),
     lastAt: atRaw ? Number(atRaw) : null,
   }
+}
+
+// 记录最近一次 recall 的内容（query + 完整轨迹），用于 debug "为什么召回到这些"
+// 0 token 0 LLM 纯 meta UPSERT
+//  hits 接受两种形式：
+//    - string[]：仅 id（兼容老调用）
+//    - { id, score, importance, tier, fromGraph, rank }[]：完整轨迹
+export function recordRecallReason(db, query, hits) {
+  try {
+    setMeta(db, 'recall.last_query', String(query ?? '').slice(0, 500))
+    let trajectory = []
+    if (Array.isArray(hits) && hits.length > 0) {
+      if (typeof hits[0] === 'string') {
+        trajectory = hits.slice(0, 30).map((id) => ({ id }))
+      } else {
+        trajectory = hits.slice(0, 30).map((h) => ({
+          id: h.id,
+          score: h.score != null ? Number(h.score).toFixed(4) : null,
+          importance: h.importance != null ? Number(h.importance).toFixed(3) : null,
+          tier: h.tier ?? null,
+          fromGraph: !!h.fromGraph,
+          rank: h.rank ?? null,
+        }))
+      }
+    }
+    setMeta(db, 'recall.last_trajectory', JSON.stringify(trajectory))
+    setMeta(db, 'recall.last_at', String(Date.now()))
+  } catch { /* debug 字段失败不影响主流程 */ }
 }
 
 // ─── Recall 性能监控（方案 A） ──────────────────────────────────
@@ -919,16 +947,6 @@ export function recordRecallPerf(db, ms) {
     setMeta(db, 'recall.ms.sum', String(newSum))
     setMeta(db, 'recall.ms.window', JSON.stringify(window))
   } catch { /* 监控失败不影响主流程 */ }
-}
-
-// 记录最近一次 recall 的内容（query + 命中的 ids），用于 debug "为什么召回到这些"
-// 0 token 0 LLM 纯 meta UPSERT
-export function recordRecallReason(db, query, ids) {
-  try {
-    setMeta(db, 'recall.last_query', String(query ?? '').slice(0, 500))
-    setMeta(db, 'recall.last_ids', JSON.stringify((ids ?? []).slice(0, 30)))
-    setMeta(db, 'recall.last_at', String(Date.now()))
-  } catch { /* debug 字段失败不影响主流程 */ }
 }
 
 export function getRecallPerf(db) {

@@ -682,7 +682,15 @@ export function apply(ctx, input = {}) {
         const ago = lastRecall.lastAt ? Math.round((Date.now() - lastRecall.lastAt) / 60000) : 0
         lines.push(`· Recall 上次调用 (${ago} 分钟前)`)
         lines.push(`  query: ${lastRecall.lastQuery.slice(0, 80)}`)
-        lines.push(`  命中: ${(lastRecall.lastIds || []).slice(0, 5).join(', ')}${(lastRecall.lastIds || []).length > 5 ? ' ...' : ''}`)
+        const traj = lastRecall.lastTrajectory || []
+        for (const h of traj.slice(0, 6)) {
+          const tag = h.fromGraph ? 'graph' : 'fts'
+          const tier = h.tier ? `[${h.tier}]` : ''
+          const imp = h.importance != null ? `imp=${h.importance}` : ''
+          const score = h.score != null ? `s=${h.score}` : ''
+          lines.push(`  #${h.rank} ${tag} ${tier}${score} ${imp} ${h.id}`.trim())
+        }
+        if (traj.length > 6) lines.push(`  ... 还有 ${traj.length - 6} 条`)
       }
       lines.push(`· Top ${top} 访问频率`)
       for (const m of s.topAccessed) {

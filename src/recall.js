@@ -154,8 +154,17 @@ export async function recall(db, cfg, query, scopeInfo = {}, embedFn = null) {
 
   // 性能监控（方案 A）：0.5ms 开销，方便 debug 趋势
   recordRecallPerf(db, Date.now() - _t0)
-  // Recall reason 记录（debug "为什么召回到这些"）：0 token
-  recordRecallReason(db, query, selected.map((s) => s.memory.id))
+  // Recall trajectory 记录：每条命中的 score/tier/fromGraph，方便 debug "为什么召回到这些"
+  // 0 token 0 LLM 纯 meta UPSERT，1 JSON 写入
+  const seedSet = new Set(lexicalHits.slice(0, limit * 3).map((h) => h.memory.id))
+  recordRecallReason(db, query, selected.map((s, i) => ({
+    id: s.memory.id,
+    score: s.score,
+    importance: s.memory.importance,
+    tier: s.memory.tier ?? null,
+    fromGraph: !seedSet.has(s.memory.id),
+    rank: i + 1,
+  })))
 
   return {
     entries: selected.map((s) => s.memory),

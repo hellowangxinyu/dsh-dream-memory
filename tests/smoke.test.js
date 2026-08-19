@@ -452,18 +452,38 @@ test('recordRecallReason + getLastRecallReason：记录和读取', () => {
   recordRecallReason(db, '测试 query', ['m-001', 'm-002', 'm-003'])
   const r = getLastRecallReason(db)
   assert.equal(r.lastQuery, '测试 query')
-  assert.deepEqual(r.lastIds, ['m-001', 'm-002', 'm-003'])
+  assert.deepEqual(r.lastTrajectory, [{ id: 'm-001' }, { id: 'm-002' }, { id: 'm-003' }])
   assert.ok(r.lastAt > 0, 'lastAt 应被设')
   // 更新：被覆盖
   recordRecallReason(db, '第二次 query', ['m-100'])
   const r2 = getLastRecallReason(db)
   assert.equal(r2.lastQuery, '第二次 query')
-  assert.deepEqual(r2.lastIds, ['m-100'])
+  assert.deepEqual(r2.lastTrajectory, [{ id: 'm-100' }])
   // 边界：空 ids
   recordRecallReason(db, '', [])
   const r3 = getLastRecallReason(db)
   assert.equal(r3.lastQuery, '')
-  assert.deepEqual(r3.lastIds, [])
+  assert.deepEqual(r3.lastTrajectory, [])
+})
+
+test('recordRecallReason：完整 trajectory（score/tier/fromGraph/rank）', () => {
+  recordRecallReason(db, 'trajectory test', [
+    { id: 'm-A', score: 0.95, importance: 0.9, tier: 'knowledge', fromGraph: false, rank: 1 },
+    { id: 'm-B', score: 0.72, importance: 0.6, tier: 'working', fromGraph: true, rank: 2 },
+    { id: 'm-C', score: 0.45, importance: 0.85, tier: 'identity', fromGraph: false, rank: 3 },
+  ])
+  const r = getLastRecallReason(db)
+  assert.equal(r.lastQuery, 'trajectory test')
+  assert.equal(r.lastTrajectory.length, 3)
+  const a = r.lastTrajectory[0]
+  assert.equal(a.id, 'm-A')
+  assert.equal(a.score, '0.9500')
+  assert.equal(a.importance, '0.900')
+  assert.equal(a.tier, 'knowledge')
+  assert.equal(a.fromGraph, false)
+  assert.equal(a.rank, 1)
+  const b = r.lastTrajectory[1]
+  assert.equal(b.fromGraph, true, 'graph 路径应被标记')
 })
 
 // ─── mergeSimilarMemories 让库保持高效简洁 ─────────────────────────────
